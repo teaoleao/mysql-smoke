@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MySQL Smoke Lab</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="ambient ambient-a"></div>
+  <div class="ambient ambient-b"></div>
+  <main class="shell">
+    <header class="topbar">
+      <a class="brand" href="/">
+        <span class="brand-mark">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 22c3.8 1.9 7.7 2.2 11.5.8 3.2-1.2 5.4-3.7 6.4-7.3-2.8 2.2-6.1 3.2-9.9 3-3.6-.2-6.4-1.2-8.3-3.1L7 22Zm1-9.5c2.7 1.7 5.6 2.6 8.7 2.5 3.5-.1 6.4-1.4 8.8-3.8-1-3.4-3-5.9-6-7.3-3.3-1.6-6.6-1.3-9.8.9C6.5 7 5.9 9.6 8 12.5Z"/></svg>
+        </span>
+        <span><strong>MySQL</strong><small>SMOKE LAB</small></span>
+      </a>
+      <div class="top-actions">
+        <span class="system-pill"><i></i> 本地执行器在线</span>
+        <button class="icon-button" id="themeToggle" title="切换视觉模式">◐</button>
+      </div>
+    </header>
+
+    <section class="hero">
+      <div>
+        <p class="eyebrow">CUDB AUTOMATION CONSOLE</p>
+        <h1>让每一次冒烟测试<br><span>清晰、可见、可追踪。</span></h1>
+        <p class="hero-copy">选择测试场景，控制台将自动启动 Edge。登录与密码由你在浏览器中人工完成，其余流程交给 Playwright。</p>
+      </div>
+      <div class="hero-orbit" aria-hidden="true">
+        <div class="core">SQL</div><i></i><i></i><i></i>
+      </div>
+    </section>
+
+    <section class="overview">
+      <div class="metric"><span>测试场景</span><strong id="testCount">—</strong><small>已接入</small></div>
+      <div class="metric"><span>当前状态</span><strong id="globalStatus">就绪</strong><small id="statusDetail">等待选择测试</small></div>
+      <div class="metric"><span>执行模式</span><strong>Headed</strong><small>可视化 Edge</small></div>
+    </section>
+
+    <section class="workspace">
+      <div class="section-heading">
+        <div><p class="eyebrow">TEST SUITES</p><h2>测试场景</h2></div>
+        <div class="legend"><span><i class="ready"></i>就绪</span><span><i class="running"></i>运行中</span><span><i class="passed"></i>通过</span></div>
+      </div>
+      <div id="testGroups" class="groups"></div>
+    </section>
+
+    <section class="terminal-panel">
+      <div class="terminal-head">
+        <div class="terminal-title"><span class="terminal-icon">&gt;_</span><div><strong>实时执行日志</strong><small id="commandText">尚未启动测试</small></div></div>
+        <div class="terminal-actions"><button id="clearLog">清空日志</button><button class="stop-button" id="stopRun" disabled>停止测试</button></div>
+      </div>
+      <pre id="terminal"><span class="muted">MySQL Smoke Lab 已就绪。选择上方测试开始执行。</span></pre>
+    </section>
+  </main>
+  <div id="toast" class="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
