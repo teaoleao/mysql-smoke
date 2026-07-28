@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const { chromium, expect } = require('@playwright/test');
+const { keepOnlyOneStartupPage } = require('./browser-pages');
 
 async function openDatabaseProxyPage(stepTimeout) {
   const userDataDir = path.resolve('.playwright/edge-profile');
@@ -21,8 +22,7 @@ async function openDatabaseProxyPage(stepTimeout) {
     ],
   });
 
-  const pages = context.pages();
-  let page = pages[0] || await context.newPage();
+  let page = await keepOnlyOneStartupPage(context);
 
   await page.goto(process.env.BASE_URL, {
     waitUntil: 'domcontentloaded',

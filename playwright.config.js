@@ -21,6 +21,10 @@ module.exports = defineConfig({
 
     // 从 .env 读取登录页地址
     baseURL: process.env.BASE_URL,
+//     launchOptions: {
+//   args: ['--no-proxy-server'],
+// },
+
     // 测试失败时自动保留证据
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',

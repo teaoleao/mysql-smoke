@@ -8,7 +8,18 @@ const toast = document.querySelector('#toast');
 let tests = [];
 let activeId = null;
 
-const symbols = { database: 'DB', layers: '57', copy: 'RO', network: 'PX', key: 'ID', trash: '×', refresh: '↻' };
+const symbols = {
+  database: 'DB',
+  layers: '57',
+  copy: 'RO',
+  network: 'PX',
+  key: 'ID',
+  trash: '×',
+  refresh: '↻',
+  download: '↓',
+  shield: 'SG',
+  power: '⏻',
+};
 const colors = ['#16a89a', '#5c8ff7', '#7a77df', '#2bb78c', '#d69b43', '#de6875', '#408fc8'];
 
 function notify(message) {

@@ -1,5 +1,9 @@
 # MySQL Smoke Lab
 
+
+代码仓库
+地址：https://github.com/teaoleao/mysql-smoke
+
 基于 Playwright 和 Microsoft Edge 的联通云 CUDB for MySQL 前端冒烟测试项目。
 
 项目提供两种执行方式：
@@ -116,6 +120,10 @@ npx playwright show-report
 | 数据库代理 | `mysql-smoke.updateProxyAccount.test.js` | 更新代理账号 |
 | 数据库代理 | `mysql-smoke.deleteProxy.test.js` | 删除代理服务 |
 | 备份与恢复 | `mysql-smoke.backupRestore.test.js` | 创建备份并执行恢复流程 |
+| 备份与恢复 | `mysql-smoke.downloadBackup.test.js` | 获取并访问备份下载地址 |
+| 备份与恢复 | `mysql-smoke.deleteBackup.test.js` | 删除最早的可删除备份 |
+| 连接与安全 | `mysql-smoke.updateSecurityGroup.test.js` | 随机实例更换安全组 |
+| 实例生命周期 | `mysql-smoke.unsubscribeInstance.test.js` | 主实例或只读实例退订及结果校验 |
 
 ## 测试执行方式
 
@@ -214,4 +222,3 @@ npx playwright show-report
 - 测试目标实例正确。
 - 已了解资源创建或删除的影响。
 - 不要在不确定的情况下运行删除和购买类测试。
-

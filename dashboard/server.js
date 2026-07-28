@@ -15,6 +15,10 @@ const TESTS = [
   { id: 'proxy-update', group: '数据库代理', name: '更新代理账号', file: 'tests/mysql-smoke.updateProxyAccount.test.js', icon: 'key' },
   { id: 'proxy-delete', group: '数据库代理', name: '删除代理服务', file: 'tests/mysql-smoke.deleteProxy.test.js', icon: 'trash' },
   { id: 'backup', group: '备份与恢复', name: '备份与恢复', file: 'tests/mysql-smoke.backupRestore.test.js', icon: 'refresh' },
+  { id: 'backup-download', group: '备份与恢复', name: '下载备份', file: 'tests/mysql-smoke.downloadBackup.test.js', icon: 'download' },
+  { id: 'backup-delete', group: '备份与恢复', name: '删除备份', file: 'tests/mysql-smoke.deleteBackup.test.js', icon: 'trash' },
+  { id: 'security-group-update', group: '连接与安全', name: '更换实例安全组', file: 'tests/mysql-smoke.updateSecurityGroup.test.js', icon: 'shield' },
+  { id: 'instance-unsubscribe', group: '实例生命周期', name: '退订实例', file: 'tests/mysql-smoke.unsubscribeInstance.test.js', icon: 'power' },
 ];
 
 let activeRun = null;

@@ -1,7 +1,8 @@
 const path = require('path');
 const { chromium, expect } = require('@playwright/test');
+const { keepOnlyOneStartupPage } = require('./browser-pages');
 
-async function openRandomMysqlInstance(stepTimeout) {
+async function openRandomMysqlInstance(stepTimeout, options = {}) {
   const userDataDir = path.resolve('.playwright/edge-profile');
   const context = await chromium.launchPersistentContext(userDataDir, {
     channel: 'msedge',
@@ -15,8 +16,7 @@ async function openRandomMysqlInstance(stepTimeout) {
     ],
   });
 
-  const pages = context.pages();
-  let page = pages[0] || await context.newPage();
+  let page = await keepOnlyOneStartupPage(context);
 
   await page.goto(process.env.BASE_URL, {
     waitUntil: 'domcontentloaded',
@@ -124,14 +124,89 @@ async function openRandomMysqlInstance(stepTimeout) {
     throw new Error('MySQL 实例列表中没有可选择的实例');
   }
 
-  const randomIndex = Math.floor(Math.random() * instanceCount);
+  const candidateIndexes = [];
+  const withReadOnlyIndexes = [];
+  const withoutReadOnlyIndexes = [];
+  for (let index = 0; index < instanceCount; index += 1) {
+    const instance = instanceNames.nth(index);
+    const currentInstanceName = (await instance.textContent())?.trim()
+      || `第 ${index + 1} 行`;
+    const instanceRow = instance.locator('xpath=ancestor::tr[1]');
+    const readOnlyExpandButton = instanceRow.locator(
+      'button[aria-label="展开行"], '
+      + 'button.ant-table-row-expand-icon-collapsed',
+    );
+    const hasReadOnlyExpandIcon = await readOnlyExpandButton.count() > 0
+      && await readOnlyExpandButton.first().isVisible().catch(() => false);
+
+    if (hasReadOnlyExpandIcon) {
+      withReadOnlyIndexes.push(index);
+    } else {
+      withoutReadOnlyIndexes.push(index);
+    }
+
+    if (options.excludeReadOnly && hasReadOnlyExpandIcon) {
+      console.log(
+        `跳过实例 ${currentInstanceName}：检测到“+”展开按钮，含有只读实例。`,
+      );
+      continue;
+    }
+
+    candidateIndexes.push(index);
+    if (options.excludeReadOnly) {
+      console.log(
+        `实例 ${currentInstanceName}：没有“+”展开按钮，可作为退订候选。`,
+      );
+    }
+  }
+
+  if (!candidateIndexes.length) {
+    throw new Error('实例列表中没有符合条件的主实例');
+  }
+
+  let selectionPool = candidateIndexes;
+  let selectedCategory = '全部实例';
+  if (options.balanceReadOnly) {
+    const preferWithReadOnly = Math.random() < 0.5;
+    if (preferWithReadOnly && withReadOnlyIndexes.length) {
+      selectionPool = withReadOnlyIndexes;
+      selectedCategory = '含只读实例';
+    } else if (!preferWithReadOnly && withoutReadOnlyIndexes.length) {
+      selectionPool = withoutReadOnlyIndexes;
+      selectedCategory = '不含只读实例';
+    } else if (withReadOnlyIndexes.length) {
+      selectionPool = withReadOnlyIndexes;
+      selectedCategory = '含只读实例（另一组为空，自动回退）';
+    } else {
+      selectionPool = withoutReadOnlyIndexes;
+      selectedCategory = '不含只读实例（另一组为空，自动回退）';
+    }
+    console.log(
+      `50/50 随机结果：选择“${selectedCategory}”组；`
+      + `含只读 ${withReadOnlyIndexes.length} 个，`
+      + `不含只读 ${withoutReadOnlyIndexes.length} 个。`,
+    );
+  }
+
+  const selectedCandidateIndex = Math.floor(
+    Math.random() * selectionPool.length,
+  );
+  const randomIndex = selectionPool[selectedCandidateIndex];
   const selectedInstance = instanceNames.nth(randomIndex);
   const instanceName = (await selectedInstance.textContent())?.trim();
-  await selectedInstance.click();
-  console.log(
-    `已随机选择第 ${randomIndex + 1}/${instanceCount} 个实例：`
-    + `${instanceName || '名称未知'}`,
-  );
+  if (options.openDetails === false) {
+    console.log(
+      `已在 ${candidateIndexes.length} 个符合条件的实例中随机锁定：`
+      + `${instanceName || '名称未知'}`
+      + `${options.excludeReadOnly ? '（不含只读实例）' : ''}`,
+    );
+  } else {
+    await selectedInstance.click();
+    console.log(
+      `已随机选择第 ${randomIndex + 1}/${instanceCount} 个实例：`
+      + `${instanceName || '名称未知'}`,
+    );
+  }
 
   return {
     context,

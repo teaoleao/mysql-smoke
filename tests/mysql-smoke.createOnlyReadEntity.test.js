@@ -1,6 +1,9 @@
 const path = require('path');
 const fs = require('fs');
 const { chromium, test, expect } = require('@playwright/test');
+const {
+  keepOnlyOneStartupPage,
+} = require('./helpers/browser-pages');
 
 test.describe.configure({ retries: 0 });
 
@@ -26,8 +29,7 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
     ],
   });
 
-  const pages = context.pages();
-  let page = pages[0] || await context.newPage();
+  let page = await keepOnlyOneStartupPage(context);
 
   try {
     // 1. 打开控制台。登录状态有效时会自动进入概览页；
@@ -142,6 +144,9 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
     await expect(instanceName).toBeVisible({ timeout: stepTimeout });
 
     const selectedName = (await instanceName.textContent())?.trim();
+    if (!selectedName) {
+      throw new Error('已找到 MySQL 5.7 实例行，但无法读取实例名称');
+    }
     const instanceRowText = await instanceRow.innerText();
     const instanceId = instanceRowText.match(/\d{8,}/)?.[0] || null;
 
@@ -166,6 +171,22 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
       .filter({ visible: true })
       .first();
     await expect(readOnlySummary).toBeVisible({ timeout: stepTimeout });
+    const initialReadOnlyText = await readOnlySummary.innerText();
+    const initialReadOnlyMatch = initialReadOnlyText.match(
+      /只读实例\s*[：:]?\s*(\d+)/,
+    );
+    if (!initialReadOnlyMatch) {
+      throw new Error(
+        `无法从详情页读取创建前只读实例数量：${initialReadOnlyText}`,
+      );
+    }
+    const initialReadOnlyCount = Number(initialReadOnlyMatch[1]);
+    targetState.initialReadOnlyCount = initialReadOnlyCount;
+    fs.writeFileSync(statePath, JSON.stringify(targetState, null, 2), 'utf8');
+    console.log(
+      `[创建只读校验] 主实例=${selectedName || '名称未知'}，`
+      + `创建前只读实例数量=${initialReadOnlyCount}。`,
+    );
 
     await page.screenshot({
       path: 'test-results/mysql57-instance-detail.png',
@@ -189,6 +210,38 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
       await page.waitForLoadState('domcontentloaded');
     }
     console.log(`已点击“添加”，只读实例配置页：${page.url()}`);
+
+    // 某些入口会先进入只读产品页，需要再点击“创建数据库只读实例”
+    // 才会真正进入配置页面。
+    const createReadOnlyButton = page.getByRole('button', {
+      name: '创建数据库只读实例',
+      exact: true,
+    }).or(
+      page.getByText('创建数据库只读实例', { exact: true }),
+    ).filter({ visible: true }).first();
+    const needsSecondEntryClick = await createReadOnlyButton.waitFor({
+      state: 'visible',
+      timeout: 15 * 1000,
+    }).then(() => true).catch(() => false);
+
+    if (needsSecondEntryClick) {
+      const configPagePromise = context.waitForEvent('page', {
+        timeout: 10 * 1000,
+      }).catch(() => null);
+      await createReadOnlyButton.click({ force: true });
+      const configPage = await configPagePromise;
+      if (configPage) {
+        page = configPage;
+        await page.waitForLoadState('domcontentloaded');
+      }
+      console.log(
+        `已自动点击“创建数据库只读实例”，当前配置页：${page.url()}`,
+      );
+    } else {
+      console.log(
+        '未出现“创建数据库只读实例”中间按钮，当前页面已直接进入配置流程。',
+      );
+    }
 
     // 10. 等待页面渲染后，从顶部开始自然浏览配置。
     await page.waitForLoadState('domcontentloaded');
@@ -357,10 +410,91 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
     });
 
     console.log('已完成“下一步：立即开通”和“确认支付”。');
+
+    const managementConsoleButton = page.getByText(
+      '管理控制台',
+      { exact: true },
+    ).filter({ visible: true }).last();
+    await expect(managementConsoleButton).toBeVisible({
+      timeout: stepTimeout,
+    });
+
+    const managementPagePromise = context.waitForEvent('page', {
+      timeout: 10 * 1000,
+    }).catch(() => null);
+    await managementConsoleButton.click();
+    const openedManagementPage = await managementPagePromise;
+    const managementPage = openedManagementPage || page;
+    await managementPage.waitForLoadState('domcontentloaded');
+    console.log(
+      `[创建只读校验] 已点击“管理控制台”，`
+      + `15秒后刷新并重新检查主实例 ${selectedName || '名称未知'}。`,
+    );
+
+    await managementPage.waitForTimeout(15 * 1000);
+    await managementPage.reload({ waitUntil: 'domcontentloaded' });
+    console.log('[创建只读校验] 15秒等待结束，实例列表已刷新。');
+
+    const verificationInstance = managementPage.getByText(
+      selectedName,
+      { exact: true },
+    ).filter({ visible: true }).first();
+    await expect(verificationInstance).toBeVisible({
+      timeout: stepTimeout,
+    });
+    await verificationInstance.click();
+    await managementPage.waitForLoadState('domcontentloaded');
+    console.log(
+      `[创建只读校验] 已重新进入主实例 ${selectedName || '名称未知'}。`,
+    );
+
+    const refreshedReadOnlySummary = managementPage.getByText(
+      /只读实例\s*[：:]?\s*\d+/,
+    ).filter({ visible: true }).first();
+    await expect(refreshedReadOnlySummary).toBeVisible({
+      timeout: stepTimeout,
+    });
+    const refreshedReadOnlyText = await refreshedReadOnlySummary.innerText();
+    const refreshedReadOnlyMatch = refreshedReadOnlyText.match(
+      /只读实例\s*[：:]?\s*(\d+)/,
+    );
+    if (!refreshedReadOnlyMatch) {
+      throw new Error(
+        `无法从刷新后的详情页读取只读实例数量：${refreshedReadOnlyText}`,
+      );
+    }
+
+    const refreshedReadOnlyCount = Number(refreshedReadOnlyMatch[1]);
+    const expectedReadOnlyCount = initialReadOnlyCount + 1;
+    const countIncreasedByOne = refreshedReadOnlyCount
+      === expectedReadOnlyCount;
+    console.log(
+      `[创建只读校验] 主实例=${selectedName || '名称未知'}，`
+      + `创建前=${initialReadOnlyCount}，刷新后=${refreshedReadOnlyCount}，`
+      + `预期=${expectedReadOnlyCount}，`
+      + `是否增加1=${countIncreasedByOne}。`,
+    );
+    if (!countIncreasedByOne) {
+      throw new Error(
+        `[创建只读校验失败] 主实例 ${selectedName || '名称未知'} `
+        + `创建前只读数量=${initialReadOnlyCount}，`
+        + `15秒后数量=${refreshedReadOnlyCount}，`
+        + `预期=${expectedReadOnlyCount}`,
+      );
+    }
+
+    targetState.verifiedReadOnlyCount = refreshedReadOnlyCount;
+    targetState.readOnlyVerifiedAt = new Date().toISOString();
+    fs.writeFileSync(statePath, JSON.stringify(targetState, null, 2), 'utf8');
+    console.log(
+      `[创建只读校验成功] 主实例 ${selectedName || '名称未知'} `
+      + `的只读实例数量已从 ${initialReadOnlyCount} 增加到 `
+      + `${refreshedReadOnlyCount}。`,
+    );
     console.log('最终页面将保持打开。');
     console.log('检查完成后请手动关闭该页面。');
 
-    await page.waitForEvent('close', { timeout: 0 });
+    await managementPage.waitForEvent('close', { timeout: 0 });
   } finally {
     await context.close();
   }

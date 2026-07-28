@@ -1,5 +1,8 @@
 const path = require('path');
 const { chromium, test, expect } = require('@playwright/test');
+const {
+  keepOnlyOneStartupPage,
+} = require('./helpers/browser-pages');
 
 // 这是需要人工登录的交互用例，失败后不能自动重开一个 Edge 窗口。
 test.describe.configure({ retries: 0 });
@@ -26,8 +29,7 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
     ],
   });
 
-  const pages = context.pages();
-  let page = pages[0] || await context.newPage();
+  let page = await keepOnlyOneStartupPage(context);
 
   try {
     // 1. 打开登录页，并确认主文档本身访问正常
@@ -146,10 +148,29 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
     await page.waitForTimeout(2 * 1000);
     console.log('已再次确认选择 MySQL 5.7。');
 
-    // 8. 保持购买页面默认云区域“廊坊二区”，直接进入网络配置。
+    // 8. 在选择 VPC 前记录系统生成的实例名称，供创建结果校验使用。
+    const instanceNameLabel = page.getByText('实例名称', { exact: true })
+      .filter({ visible: true })
+      .first();
+    await expect(instanceNameLabel).toBeVisible({ timeout: stepTimeout });
+    const instanceNameInput = instanceNameLabel.locator(
+      'xpath=following::input[1]',
+    );
+    await expect(instanceNameInput).toBeVisible({ timeout: stepTimeout });
+    const createdInstanceName = (
+      await instanceNameInput.inputValue()
+    ).trim();
+    if (!createdInstanceName) {
+      throw new Error('实例名称输入框为空，无法记录待验证的实例名称');
+    }
+    console.log(
+      `[创建5.7校验] 已在选择 VPC 前记录实例名称：${createdInstanceName}。`,
+    );
+
+    // 9. 保持购买页面默认云区域“廊坊二区”，直接进入网络配置。
     console.log('保持默认云区域“廊坊二区”，开始选择网络配置。');
 
-    // 9. 依次选择 VPC、子网和安全组；为空时每隔 5 秒重试。
+    // 10. 依次选择 VPC、子网和安全组；为空时每隔 5 秒重试。
     const selectFirstAvailableOption = async (placeholder) => {
       const placeholderElement = page
         .locator('span.ant-select-selection-placeholder')
@@ -360,10 +381,65 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
     });
 
     console.log('已点击“下一步：立即开通”。');
+
+    const managementConsoleButton = page.getByText(
+      '管理控制台',
+      { exact: true },
+    ).filter({ visible: true }).last();
+    await expect(managementConsoleButton).toBeVisible({
+      timeout: stepTimeout,
+    });
+
+    const managementPagePromise = context.waitForEvent('page', {
+      timeout: 10 * 1000,
+    }).catch(() => null);
+    await managementConsoleButton.click();
+    const openedManagementPage = await managementPagePromise;
+    const managementPage = openedManagementPage || page;
+    await managementPage.waitForLoadState('domcontentloaded');
+    console.log(
+      `[创建5.7校验] 已点击“管理控制台”，`
+      + `5分钟后刷新并校验实例 ${createdInstanceName}。`,
+    );
+
+    await managementPage.waitForTimeout(5 * 60 * 1000);
+    await managementPage.reload({ waitUntil: 'domcontentloaded' });
+    console.log('[创建5.7校验] 5分钟等待结束，实例列表已刷新。');
+
+    const createdInstanceLink = managementPage.getByText(
+      createdInstanceName,
+      { exact: true },
+    ).filter({ visible: true }).first();
+    await expect(createdInstanceLink).toBeVisible({
+      timeout: stepTimeout,
+    });
+
+    const createdInstanceRow = createdInstanceLink.locator(
+      'xpath=ancestor::tr[1]',
+    );
+    await expect(createdInstanceRow).toBeVisible({ timeout: stepTimeout });
+    const createdInstanceRowText = (
+      await createdInstanceRow.innerText()
+    ).replace(/\s+/g, ' ').trim();
+    const isRunning = /运行中/.test(createdInstanceRowText);
+    console.log(
+      `[创建5.7校验] 实例=${createdInstanceName}，`
+      + `列表行=${JSON.stringify(createdInstanceRowText)}，`
+      + `是否运行中=${isRunning}。`,
+    );
+    if (!isRunning) {
+      throw new Error(
+        `[创建5.7校验失败] 实例 ${createdInstanceName} `
+        + `等待5分钟后不是“运行中”，实际行内容：${createdInstanceRowText}`,
+      );
+    }
+    console.log(
+      `[创建5.7校验成功] 实例 ${createdInstanceName} 已进入“运行中”。`,
+    );
     console.log('浏览器将保持打开；检查完成后请手动关闭该页面。');
 
     // 不自动关闭最终页面，等待人工检查并关闭。
-    await page.waitForEvent('close', { timeout: 0 });
+    await managementPage.waitForEvent('close', { timeout: 0 });
   } finally {
     await context.close();
   }
