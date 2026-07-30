@@ -1,37 +1,52 @@
 const path = require('path');
 const { chromium, expect } = require('@playwright/test');
-const { keepOnlyOneStartupPage } = require('./browser-pages');
+const {
+  keepOnlyOneStartupPage,
+  returnToMysqlInstanceList,
+} = require('./browser-pages');
 
 async function openRandomMysqlInstance(stepTimeout, options = {}) {
+  const runtime = options.runtime || null;
   const userDataDir = path.resolve('.playwright/edge-profile');
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    channel: 'msedge',
-    headless: false,
-    locale: 'zh-CN',
-    viewport: null,
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--start-maximized',
-    ],
-  });
+  const context = runtime?.context
+    || await chromium.launchPersistentContext(userDataDir, {
+      channel: 'msedge',
+      headless: false,
+      locale: 'zh-CN',
+      viewport: null,
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--start-maximized',
+      ],
+    });
 
-  let page = await keepOnlyOneStartupPage(context);
+  let page = runtime?.page && !runtime.page.isClosed()
+    ? runtime.page
+    : await keepOnlyOneStartupPage(context);
 
-  await page.goto(process.env.BASE_URL, {
-    waitUntil: 'domcontentloaded',
-  });
+  if (runtime) {
+    page = await returnToMysqlInstanceList(page, stepTimeout);
+    runtime.setPage(page);
+    console.log(
+      `[串联导航复用] 已在同一 Edge 中回到 MySQL 实例列表：${page.url()}；`
+      + '未打开联通云门户、产品页或新的控制台标签。',
+    );
+  } else {
+    await page.goto(process.env.BASE_URL, {
+      waitUntil: 'domcontentloaded',
+    });
 
-  if (!/\/console\/home\/overview(?:[/?#]|$)/.test(page.url())) {
-    console.log('登录状态已失效，请在 Edge 中手动登录。');
-  }
+    if (!/\/console\/home\/overview(?:[/?#]|$)/.test(page.url())) {
+      console.log('登录状态已失效，请在 Edge 中手动登录。');
+    }
 
-  await page.waitForURL(/\/console\/home\/overview(?:[/?#]|$)/, {
-    timeout: stepTimeout,
-  });
-  await expect(
-    page.getByText('概览', { exact: true }).first(),
-  ).toBeVisible({ timeout: stepTimeout });
+    await page.waitForURL(/\/console\/home\/overview(?:[/?#]|$)/, {
+      timeout: stepTimeout,
+    });
+    await expect(
+      page.getByText('概览', { exact: true }).first(),
+    ).toBeVisible({ timeout: stepTimeout });
 
   const cloudLogo = page.locator('div.logo').first();
   await expect(cloudLogo).toBeVisible({ timeout: stepTimeout });
@@ -109,10 +124,11 @@ async function openRandomMysqlInstance(stepTimeout, options = {}) {
   }).catch(() => null);
   await loginConsole.click();
 
-  const consolePage = await consolePagePromise;
-  if (consolePage) {
-    page = consolePage;
-    await page.waitForLoadState('domcontentloaded');
+    const consolePage = await consolePagePromise;
+    if (consolePage) {
+      page = consolePage;
+      await page.waitForLoadState('domcontentloaded');
+    }
   }
 
   const instanceNames = page.getByText(/^mysql_[a-z0-9_-]+$/i)
@@ -212,6 +228,7 @@ async function openRandomMysqlInstance(stepTimeout, options = {}) {
     context,
     page,
     instanceName: instanceName || null,
+    ownsContext: !runtime,
   };
 }
 

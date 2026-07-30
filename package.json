@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dashboard": "node dashboard/server.js"
+    "dashboard": "node dashboard/server.js",
+    "smoke:mysql:chain": "playwright test tests/workflows/mysql-smoke-chain.test.js --headed --workers=1"
   },
   "keywords": [],
   "author": "",

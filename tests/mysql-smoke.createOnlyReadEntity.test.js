@@ -7,7 +7,7 @@ const {
 
 test.describe.configure({ retries: 0 });
 
-test('MySQL 5.7 创建只读实例冒烟测试', async () => {
+async function runCreateOnlyReadEntity(runtime = null) {
   // 最终实例详情页保持打开，直到人工关闭。
   test.setTimeout(0);
 
@@ -17,21 +17,52 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
   const statePath = path.join(stateDir, 'mysql-smoke-target.json');
   let targetState = null;
 
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    channel: 'msedge',
-    headless: false,
-    locale: 'zh-CN',
-    viewport: null,
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--start-maximized',
-    ],
-  });
+  const context = runtime?.context
+    || await chromium.launchPersistentContext(userDataDir, {
+      channel: 'msedge',
+      headless: false,
+      locale: 'zh-CN',
+      viewport: null,
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--start-maximized',
+      ],
+    });
 
-  let page = await keepOnlyOneStartupPage(context);
+  let page = runtime?.page && !runtime.page.isClosed()
+    ? runtime.page
+    : await keepOnlyOneStartupPage(context);
 
   try {
+    let selectedName = null;
+    let instanceId = null;
+    const startAtInstanceDetail = Boolean(
+      runtime?.state?.nextScenario?.startAtInstanceDetail,
+    );
+
+    if (startAtInstanceDetail) {
+      selectedName = runtime.state.nextScenario.instanceName || null;
+      instanceId = runtime.state.nextScenario.instanceId || null;
+      targetState = {
+        instanceName: selectedName,
+        instanceId,
+        databaseVersion: 'mysql 5.7',
+        readOnlyCreated: false,
+        selectedAt: new Date().toISOString(),
+      };
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(
+        statePath,
+        JSON.stringify(targetState, null, 2),
+        'utf8',
+      );
+      console.log(
+        `[创建只读串联入口] 已复用实例 ${selectedName || '名称未知'} `
+        + '的详情页，跳过登录、产品导航、控制台入口和实例选择。',
+      );
+      runtime.state.nextScenario = null;
+    } else {
     // 1. 打开控制台。登录状态有效时会自动进入概览页；
     //    登录失效时等待人工完成登录。
     await page.goto(process.env.BASE_URL, {
@@ -143,12 +174,12 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
       );
     await expect(instanceName).toBeVisible({ timeout: stepTimeout });
 
-    const selectedName = (await instanceName.textContent())?.trim();
+    selectedName = (await instanceName.textContent())?.trim();
     if (!selectedName) {
       throw new Error('已找到 MySQL 5.7 实例行，但无法读取实例名称');
     }
     const instanceRowText = await instanceRow.innerText();
-    const instanceId = instanceRowText.match(/\d{8,}/)?.[0] || null;
+    instanceId = instanceRowText.match(/\d{8,}/)?.[0] || null;
 
     targetState = {
       instanceName: selectedName || null,
@@ -163,6 +194,7 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
 
     await instanceName.click();
     console.log(`已点击 MySQL 5.7 实例：${selectedName || '未读取到名称'}`);
+    }
 
     // 8. 等待实例详情页出现“只读实例：数字”。
     //    无论当前是 0 还是正数，本用例都继续点击“添加”创建新的只读实例。
@@ -426,6 +458,7 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
     const openedManagementPage = await managementPagePromise;
     const managementPage = openedManagementPage || page;
     await managementPage.waitForLoadState('domcontentloaded');
+    const instanceListUrl = managementPage.url();
     console.log(
       `[创建只读校验] 已点击“管理控制台”，`
       + `15秒后刷新并重新检查主实例 ${selectedName || '名称未知'}。`,
@@ -491,11 +524,60 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
       + `的只读实例数量已从 ${initialReadOnlyCount} 增加到 `
       + `${refreshedReadOnlyCount}。`,
     );
+
+    if (runtime) {
+      console.log(
+        `[3->4衔接] 只读实例校验完成，正在返回同一 Edge 中的实例列表：`
+        + `${instanceListUrl}。`,
+      );
+      await managementPage.goto(instanceListUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: stepTimeout,
+      });
+      await managementPage.getByText(/^mysql\s*5\.7$/i)
+        .filter({ visible: true })
+        .first()
+        .waitFor({ state: 'visible', timeout: stepTimeout });
+      console.log(
+        `[3->4衔接成功] 已回到实例列表；第四项将优先使用主实例 `
+        + `${selectedName || '名称未知'} 创建数据库代理。`,
+      );
+    }
+
     console.log('最终页面将保持打开。');
     console.log('检查完成后请手动关闭该页面。');
 
+    if (runtime) {
+      runtime.setPage(managementPage);
+      runtime.state.readonly = {
+        instanceName: selectedName,
+        countBefore: initialReadOnlyCount,
+        countAfter: refreshedReadOnlyCount,
+      };
+      runtime.state.nextScenario = {
+        name: '创建数据库代理',
+        startAtInstanceList: true,
+        instanceName: selectedName,
+        instanceListUrl,
+        source: '创建只读实例成功页的“管理控制台”',
+      };
+      return {
+        page: managementPage,
+        detail: `${selectedName} 只读实例数 ${initialReadOnlyCount} → ${refreshedReadOnlyCount}`,
+      };
+    }
     await managementPage.waitForEvent('close', { timeout: 0 });
   } finally {
-    await context.close();
+    if (!runtime) await context.close();
   }
-});
+}
+
+if (process.env.MYSQL_SMOKE_CHAIN_IMPORT !== '1') {
+  test('MySQL 5.7 创建只读实例冒烟测试', async () => {
+    await runCreateOnlyReadEntity();
+  });
+}
+
+module.exports = {
+  runCreateOnlyReadEntity,
+};

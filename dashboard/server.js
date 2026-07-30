@@ -75,7 +75,14 @@ function startTest(test) {
     windowsHide: true,
   });
 
-  activeRun = { runId, test, child, startedAt, status: 'running' };
+  activeRun = {
+    runId,
+    test,
+    child,
+    startedAt,
+    status: 'running',
+    stopRequested: false,
+  };
   emit({ type: 'started', runId, testId: test.id, command: `npx ${args.join(' ')}`, startedAt });
 
   const forward = (stream, chunk) => {
@@ -85,10 +92,59 @@ function startTest(test) {
   child.stderr.on('data', (chunk) => forward('stderr', chunk));
   child.on('error', (error) => forward('stderr', `${error.message}\n`));
   child.on('close', (code, signal) => {
-    const status = code === 0 ? 'passed' : signal ? 'stopped' : 'failed';
+    const status = activeRun?.runId === runId && activeRun.stopRequested
+      ? 'stopped'
+      : code === 0
+        ? 'passed'
+        : signal
+          ? 'stopped'
+          : 'failed';
     emit({ type: 'finished', runId, testId: test.id, status, code, signal, finishedAt: new Date().toISOString() });
-    activeRun = null;
+    if (activeRun?.runId === runId) activeRun = null;
   });
+}
+
+function stopActiveRun() {
+  if (!activeRun) return Promise.resolve(false);
+
+  const run = activeRun;
+  run.stopRequested = true;
+  run.status = 'stopping';
+  emit({
+    type: 'log',
+    runId: run.runId,
+    stream: 'stderr',
+    text: `\n[STOP] 正在终止 Playwright 进程树（PID ${run.child.pid}）...\n`,
+  });
+
+  if (process.platform === 'win32') {
+    return new Promise((resolve, reject) => {
+      const killer = spawn(
+        'taskkill.exe',
+        ['/PID', String(run.child.pid), '/T', '/F'],
+        { windowsHide: true },
+      );
+      let errorText = '';
+      killer.stderr.on('data', (chunk) => {
+        errorText += chunk.toString();
+      });
+      killer.on('error', reject);
+      killer.on('close', (code) => {
+        if (code !== 0 && run.child.exitCode === null) {
+          reject(new Error(errorText.trim() || `taskkill 退出码 ${code}`));
+          return;
+        }
+        resolve(true);
+      });
+    });
+  }
+
+  run.child.kill('SIGINT');
+  const forceTimer = setTimeout(() => {
+    if (run.child.exitCode === null) run.child.kill('SIGKILL');
+  }, 5000);
+  forceTimer.unref();
+  return Promise.resolve(true);
 }
 
 const server = http.createServer((request, response) => {
@@ -130,8 +186,18 @@ const server = http.createServer((request, response) => {
 
   if (request.method === 'POST' && request.url === '/api/stop') {
     if (!activeRun) return sendJson(response, 200, { ok: true, message: '当前没有运行中的测试' });
-    activeRun.child.kill();
-    sendJson(response, 202, { ok: true });
+    stopActiveRun()
+      .then(() => sendJson(response, 202, { ok: true }))
+      .catch((error) => {
+        if (activeRun) {
+          activeRun.stopRequested = false;
+          activeRun.status = 'running';
+        }
+        sendJson(response, 500, {
+          ok: false,
+          error: `停止测试失败：${error.message}`,
+        });
+      });
     return;
   }
 

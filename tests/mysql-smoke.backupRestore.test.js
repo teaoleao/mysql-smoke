@@ -5,7 +5,7 @@ const {
 
 test.describe.configure({ retries: 0 });
 
-test('MySQL 备份恢复 - 创建数据备份', async () => {
+async function runBackupRestore(runtime = null) {
   test.setTimeout(0);
   const stepTimeout = 10 * 60 * 1000;
 
@@ -13,7 +13,7 @@ test('MySQL 备份恢复 - 创建数据备份', async () => {
     context,
     page,
     instanceName,
-  } = await openRandomMysqlInstance(stepTimeout);
+  } = await openRandomMysqlInstance(stepTimeout, { runtime });
 
   try {
     // 1. 点击实例详情页左侧“备份恢复”。
@@ -332,14 +332,41 @@ test('MySQL 备份恢复 - 创建数据备份', async () => {
       `已对实例 ${instanceName || '名称未知'} 创建备份并完成恢复校验。`,
     );
     console.log('后续页面保持打开，检查完成后请手动关闭。');
+    if (runtime) {
+      runtime.setPage(restorePage);
+      runtime.state.backup = {
+        ...(runtime.state.backup || {}),
+        instanceName,
+        restoredInstanceName,
+        restoredInstanceId,
+        status: '运行中',
+      };
+      return {
+        page: restorePage,
+        detail: `${restoredInstanceName || instanceName || '实例'} 备份恢复成功`,
+      };
+    }
     const openPage = context.pages().find((candidate) => !candidate.isClosed());
     if (openPage) await openPage.waitForEvent('close', { timeout: 0 });
   } catch (error) {
     console.error(`[备份恢复测试失败] ${error.message}`);
     console.log('发生错误后浏览器不会自动关闭，请检查页面后手动关闭。');
-    const openPage = context.pages().find((candidate) => !candidate.isClosed());
-    if (openPage) await openPage.waitForEvent('close', { timeout: 0 });
+    if (!runtime) {
+      const openPage = context.pages().find((candidate) => !candidate.isClosed());
+      if (openPage) await openPage.waitForEvent('close', { timeout: 0 });
+    }
+    throw error;
   } finally {
-    await context.close();
+    if (!runtime) await context.close();
   }
-});
+}
+
+if (process.env.MYSQL_SMOKE_CHAIN_IMPORT !== '1') {
+  test('MySQL 备份恢复 - 创建数据备份', async () => {
+    await runBackupRestore();
+  });
+}
+
+module.exports = {
+  runBackupRestore,
+};

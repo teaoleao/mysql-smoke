@@ -5,7 +5,7 @@ const {
 
 test.describe.configure({ retries: 0 });
 
-test('更新 MySQL 5.7 数据库代理账号', async () => {
+async function runUpdateProxyAccount(runtime = null) {
   test.setTimeout(0);
   const stepTimeout = 10 * 60 * 1000;
 
@@ -13,7 +13,7 @@ test('更新 MySQL 5.7 数据库代理账号', async () => {
     context,
     page,
     instanceName: initialInstanceName,
-  } = await openDatabaseProxyPage(stepTimeout);
+  } = await openDatabaseProxyPage(stepTimeout, { runtime });
 
   try {
     const attemptedInstances = new Set(
@@ -51,21 +51,30 @@ test('更新 MySQL 5.7 数据库代理账号', async () => {
         '您尚未开启数据库代理服务',
       );
       const enableProxy = await findVisibleAcrossFrames('开启数据库代理');
-      if (!noProxyMessage && !enableProxy) {
+      const createReadOnly = await findVisibleAcrossFrames('创建只读实例');
+      if (!noProxyMessage && !enableProxy && !createReadOnly) {
         console.log(
           `[更新代理账号] 实例 ${currentInstanceName} 的代理页面仍在渲染，`
-          + '等待“更新代理账号”或空代理提示出现。',
+          + '等待“更新代理账号”、空代理提示或“创建只读实例”提示出现。',
         );
         await expect.poll(async () => {
           updateProxyAccount = await findVisibleAcrossFrames('更新代理账号');
           return Boolean(updateProxyAccount)
             || Boolean(await findVisibleAcrossFrames('您尚未开启数据库代理服务'))
-            || Boolean(await findVisibleAcrossFrames('开启数据库代理'));
+            || Boolean(await findVisibleAcrossFrames('开启数据库代理'))
+            || Boolean(await findVisibleAcrossFrames('创建只读实例'));
         }, {
           timeout: stepTimeout,
           message: '等待数据库代理状态页面渲染完成',
         }).toBe(true);
         if (updateProxyAccount) continue;
+      }
+
+      if (createReadOnly || await findVisibleAcrossFrames('创建只读实例')) {
+        console.log(
+          `[更新代理账号] 实例 ${currentInstanceName} 尚未创建只读实例，`
+          + '无法更新代理账号，返回实例列表并更换实例。',
+        );
       }
 
       console.log(
@@ -135,6 +144,7 @@ test('更新 MySQL 5.7 数据库代理账号', async () => {
         Boolean(await findVisibleAcrossFrames('更新代理账号'))
         || Boolean(await findVisibleAcrossFrames('您尚未开启数据库代理服务'))
         || Boolean(await findVisibleAcrossFrames('开启数据库代理'))
+        || Boolean(await findVisibleAcrossFrames('创建只读实例'))
       ), {
         timeout: stepTimeout,
         intervals: [500, 1000, 2000],
@@ -234,8 +244,31 @@ test('更新 MySQL 5.7 数据库代理账号', async () => {
     });
 
     console.log('代理账号更新操作已完成，页面保持打开。');
+    if (runtime) {
+      runtime.setPage(page);
+      runtime.state.proxy = {
+        ...(runtime.state.proxy || {}),
+        instanceName: currentInstanceName,
+        status: '运行中',
+        accountUpdated: true,
+      };
+      return {
+        page,
+        detail: `实例 ${currentInstanceName} 代理账号更新成功`,
+      };
+    }
     await page.waitForEvent('close', { timeout: 0 });
   } finally {
-    await context.close();
+    if (!runtime) await context.close();
   }
-});
+}
+
+if (process.env.MYSQL_SMOKE_CHAIN_IMPORT !== '1') {
+  test('更新 MySQL 5.7 数据库代理账号', async () => {
+    await runUpdateProxyAccount();
+  });
+}
+
+module.exports = {
+  runUpdateProxyAccount,
+};

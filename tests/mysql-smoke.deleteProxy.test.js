@@ -5,7 +5,7 @@ const {
 
 test.describe.configure({ retries: 0 });
 
-test('删除 MySQL 5.7 数据库代理服务', async () => {
+async function runDeleteProxy(runtime = null) {
   test.setTimeout(0);
   const stepTimeout = 10 * 60 * 1000;
 
@@ -13,7 +13,7 @@ test('删除 MySQL 5.7 数据库代理服务', async () => {
     context,
     page,
     instanceName: initialInstanceName = '名称未知',
-  } = await openDatabaseProxyPage(stepTimeout);
+  } = await openDatabaseProxyPage(stepTimeout, { runtime });
 
   try {
     let currentInstanceName = initialInstanceName;
@@ -275,14 +275,38 @@ test('删除 MySQL 5.7 数据库代理服务', async () => {
     });
 
     console.log('代理删除操作及结果校验均已成功，页面保持打开。');
+    if (runtime) {
+      runtime.setPage(page);
+      runtime.state.proxy = {
+        ...(runtime.state.proxy || {}),
+        instanceName: currentInstanceName,
+        deletedAddress: targetAddress,
+        deleted: true,
+      };
+      return {
+        page,
+        detail: `实例 ${currentInstanceName} 的代理 ${targetAddress || selectedProxyNodeText} 已删除`,
+      };
+    }
     await page.waitForEvent('close', { timeout: 0 });
   } catch (error) {
     console.error(`[删除代理测试失败] ${error.message}`);
     console.log('删除代理测试失败，但浏览器不会自动关闭，请检查后手动关闭。');
-    if (!page.isClosed()) {
+    if (!runtime && !page.isClosed()) {
       await page.waitForEvent('close', { timeout: 0 });
     }
+    throw error;
   } finally {
-    await context.close();
+    if (!runtime) await context.close();
   }
-});
+}
+
+if (process.env.MYSQL_SMOKE_CHAIN_IMPORT !== '1') {
+  test('删除 MySQL 5.7 数据库代理服务', async () => {
+    await runDeleteProxy();
+  });
+}
+
+module.exports = {
+  runDeleteProxy,
+};

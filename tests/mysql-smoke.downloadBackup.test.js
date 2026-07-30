@@ -5,7 +5,7 @@ const {
 
 test.describe.configure({ retries: 0 });
 
-test('MySQL 备份实例 - 复制外网下载地址并访问', async () => {
+async function runDownloadBackup(runtime = null) {
   test.setTimeout(0);
   const stepTimeout = 10 * 60 * 1000;
 
@@ -13,7 +13,7 @@ test('MySQL 备份实例 - 复制外网下载地址并访问', async () => {
     context,
     page,
     instanceName,
-  } = await openRandomMysqlInstance(stepTimeout);
+  } = await openRandomMysqlInstance(stepTimeout, { runtime });
 
   try {
     // 1. 进入实例详情页左侧“备份恢复”。
@@ -108,8 +108,29 @@ test('MySQL 备份实例 - 复制外网下载地址并访问', async () => {
       + `实例=${instanceName || '名称未知'}。`,
     );
     console.log('浏览器将保持打开，检查完成后请手动关闭。');
+    if (runtime) {
+      runtime.setPage(downloadPage);
+      runtime.state.backup = {
+        ...(runtime.state.backup || {}),
+        downloadUrl: recordedDownloadUrl,
+      };
+      return {
+        page: downloadPage,
+        detail: `外网下载地址已访问：${recordedDownloadUrl}`,
+      };
+    }
     await downloadPage.waitForEvent('close', { timeout: 0 });
   } finally {
-    await context.close();
+    if (!runtime) await context.close();
   }
-});
+}
+
+if (process.env.MYSQL_SMOKE_CHAIN_IMPORT !== '1') {
+  test('MySQL 备份实例 - 复制外网下载地址并访问', async () => {
+    await runDownloadBackup();
+  });
+}
+
+module.exports = {
+  runDownloadBackup,
+};

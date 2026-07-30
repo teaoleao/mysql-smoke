@@ -5,7 +5,7 @@ const {
 
 test.describe.configure({ retries: 0 });
 
-test('MySQL 实例退订入口冒烟测试', async () => {
+async function runUnsubscribeInstance(runtime = null) {
   test.setTimeout(0);
   const stepTimeout = 10 * 60 * 1000;
 
@@ -15,6 +15,7 @@ test('MySQL 实例退订入口冒烟测试', async () => {
     instanceName,
   } = await openRandomMysqlInstance(stepTimeout, {
     openDetails: false,
+    runtime,
   });
 
   try {
@@ -135,15 +136,34 @@ test('MySQL 实例退订入口冒烟测试', async () => {
     console.log(`已提交实例 ${unsubscribeTargetName} 的退订申请。`);
 
     console.log('退订提交操作已完成，页面保持打开供人工检查。');
-    await new Promise((resolve) => {
-      context.once('close', resolve);
-    });
+    if (runtime) {
+      runtime.setPage(unsubscribePage);
+      runtime.state.unsubscribe = {
+        instanceName,
+        targetName: unsubscribeTargetName,
+      };
+      return {
+        page: unsubscribePage,
+        detail: `已提交退订：${unsubscribeTargetName}`,
+      };
+    }
+    await new Promise((resolve) => context.once('close', resolve));
   } catch (error) {
     console.error(`实例退订入口测试失败：${error.message}`);
     console.log('发生错误后浏览器不会自动关闭，请检查页面后手动关闭。');
-    await new Promise((resolve) => {
-      context.once('close', resolve);
-    });
+    if (!runtime) {
+      await new Promise((resolve) => context.once('close', resolve));
+    }
     throw error;
   }
-});
+}
+
+if (process.env.MYSQL_SMOKE_CHAIN_IMPORT !== '1') {
+  test('MySQL 实例退订入口冒烟测试', async () => {
+    await runUnsubscribeInstance();
+  });
+}
+
+module.exports = {
+  runUnsubscribeInstance,
+};

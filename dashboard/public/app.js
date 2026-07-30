@@ -123,6 +123,17 @@ events.onmessage = ({ data }) => {
 };
 
 document.querySelector('#clearLog').addEventListener('click', () => { terminal.innerHTML = '<span class="muted">日志已清空。</span>'; });
-stopButton.addEventListener('click', async () => { await fetch('/api/stop', { method: 'POST' }); notify('正在停止测试'); });
+stopButton.addEventListener('click', async () => {
+  stopButton.disabled = true;
+  notify('正在停止测试及其浏览器进程');
+  try {
+    const response = await fetch('/api/stop', { method: 'POST' });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || '停止测试失败');
+  } catch (error) {
+    notify(error.message);
+    stopButton.disabled = false;
+  }
+});
 document.querySelector('#themeToggle').addEventListener('click', () => document.body.classList.toggle('compact'));
 initialize().catch((error) => notify(error.message));

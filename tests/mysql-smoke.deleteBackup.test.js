@@ -5,7 +5,7 @@ const {
 
 test.describe.configure({ retries: 0 });
 
-test('MySQL 备份实例 - 删除保存时间最长的可删除备份', async () => {
+async function runDeleteBackup(runtime = null) {
   test.setTimeout(0);
   const stepTimeout = 10 * 60 * 1000;
 
@@ -13,7 +13,7 @@ test('MySQL 备份实例 - 删除保存时间最长的可删除备份', async ()
     context,
     page,
     instanceName,
-  } = await openRandomMysqlInstance(stepTimeout);
+  } = await openRandomMysqlInstance(stepTimeout, { runtime });
 
   const checkedInstances = new Set();
   if (instanceName) checkedInstances.add(instanceName);
@@ -105,8 +105,25 @@ test('MySQL 备份实例 - 删除保存时间最长的可删除备份', async ()
       `已删除实例 ${selectedInstanceName || '名称未知'} 中保存时间最长的可删除备份。`,
     );
     console.log('页面保持打开，检查完成后请手动关闭。');
+    if (runtime) {
+      runtime.setPage(page);
+      return {
+        page,
+        detail: `已删除实例 ${selectedInstanceName || '名称未知'} 中最旧的可删除备份`,
+      };
+    }
     await page.waitForEvent('close', { timeout: 0 });
   } finally {
-    await context.close();
+    if (!runtime) await context.close();
   }
-});
+}
+
+if (process.env.MYSQL_SMOKE_CHAIN_IMPORT !== '1') {
+  test('MySQL 备份实例 - 删除保存时间最长的可删除备份', async () => {
+    await runDeleteBackup();
+  });
+}
+
+module.exports = {
+  runDeleteBackup,
+};

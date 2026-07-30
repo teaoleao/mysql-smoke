@@ -7,7 +7,7 @@ const {
 // 这是需要人工登录的交互用例，失败后不能自动重开一个 Edge 窗口。
 test.describe.configure({ retries: 0 });
 
-test('MySQL 5.7 创建只读实例冒烟测试', async () => {
+async function runCreate57Entity(runtime = null) {
   // 最终页面需要保持打开，直到人工关闭，因此测试不设置总超时。
   test.setTimeout(0);
 
@@ -17,21 +17,36 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
   // 使用项目专属的持久化 Edge 用户目录。
   // 站点的安全校验 Cookie 和登录状态会在后续运行中保留。
   const userDataDir = path.resolve('.playwright/edge-profile');
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    channel: 'msedge',
-    headless: false,
-    locale: 'zh-CN',
-    viewport: null,
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--start-maximized',
-    ],
-  });
+  const context = runtime?.context
+    || await chromium.launchPersistentContext(userDataDir, {
+      channel: 'msedge',
+      headless: false,
+      locale: 'zh-CN',
+      viewport: null,
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--start-maximized',
+      ],
+    });
 
-  let page = await keepOnlyOneStartupPage(context);
+  let page = runtime?.page && !runtime.page.isClosed()
+    ? runtime.page
+    : await keepOnlyOneStartupPage(context);
 
   try {
+    const startAtBuyPage = Boolean(
+      runtime?.state?.nextScenario?.startAtBuyPage
+      && /\/console\/mysql\/buy(?:[/?#]|$)/.test(page.url()),
+    );
+
+    if (startAtBuyPage) {
+      console.log(
+        '[创建5.7串联入口] 已复用 8.0 测试后的购买页面，'
+        + '跳过登录、联通云、产品、MySQL 产品页和“立即购买”。',
+      );
+      runtime.state.nextScenario = null;
+    } else {
     // 1. 打开登录页，并确认主文档本身访问正常
     const response = await page.goto(process.env.BASE_URL, {
       waitUntil: 'domcontentloaded',
@@ -129,6 +144,7 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
       await page.waitForLoadState('domcontentloaded');
     }
     console.log(`已点击“立即购买”，购买页面：${page.url()}`);
+    }
 
     // 7. 购买页提供 8.0 和 5.7 两个数据库版本，本用例选择 5.7。
     // 先等待购买表单的默认配置接口完成，避免稍后重新覆盖为 8.0。
@@ -439,8 +455,29 @@ test('MySQL 5.7 创建只读实例冒烟测试', async () => {
     console.log('浏览器将保持打开；检查完成后请手动关闭该页面。');
 
     // 不自动关闭最终页面，等待人工检查并关闭。
+    if (runtime) {
+      runtime.setPage(managementPage);
+      runtime.state.create57 = {
+        instanceName: createdInstanceName,
+        status: '运行中',
+      };
+      return {
+        page: managementPage,
+        detail: `MySQL 5.7 实例 ${createdInstanceName} 已运行`,
+      };
+    }
     await managementPage.waitForEvent('close', { timeout: 0 });
   } finally {
-    await context.close();
+    if (!runtime) await context.close();
   }
-});
+}
+
+if (process.env.MYSQL_SMOKE_CHAIN_IMPORT !== '1') {
+  test('MySQL 5.7 创建只读实例冒烟测试', async () => {
+    await runCreate57Entity();
+  });
+}
+
+module.exports = {
+  runCreate57Entity,
+};

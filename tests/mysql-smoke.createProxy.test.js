@@ -7,7 +7,7 @@ const {
 
 test.describe.configure({ retries: 0 });
 
-test('为刚创建只读节点的 MySQL 5.7 实例开启数据库代理', async () => {
+async function runCreateProxy(runtime = null) {
   test.setTimeout(0);
 
   const stepTimeout = 10 * 60 * 1000;
@@ -17,103 +17,134 @@ test('为刚创建只读节点的 MySQL 5.7 实例开启数据库代理', async 
     ? JSON.parse(fs.readFileSync(statePath, 'utf8'))
     : null;
 
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    channel: 'msedge',
-    headless: false,
-    locale: 'zh-CN',
-    viewport: null,
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--start-maximized',
-    ],
-  });
+  const context = runtime?.context
+    || await chromium.launchPersistentContext(userDataDir, {
+      channel: 'msedge',
+      headless: false,
+      locale: 'zh-CN',
+      viewport: null,
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--start-maximized',
+      ],
+    });
 
-  let page = await keepOnlyOneStartupPage(context);
+  let page = runtime?.page && !runtime.page.isClosed()
+    ? runtime.page
+    : await keepOnlyOneStartupPage(context);
+  const chainedEntry = runtime?.state?.nextScenario;
+  const startAtInstanceList = Boolean(
+    runtime
+    && (
+      (
+        chainedEntry?.name === '创建数据库代理'
+        && chainedEntry?.startAtInstanceList
+      )
+      || /\/console\/mysql\/main\/instancemanage(?:[/?#]|$)/.test(page.url())
+    ),
+  );
 
   try {
-    // 1. 复用持久化登录状态；失效时等待人工重新登录。
-    await page.goto(process.env.BASE_URL, {
-      waitUntil: 'domcontentloaded',
-    });
+    if (startAtInstanceList) {
+      console.log(
+        `[3->4衔接] 复用第三项打开的实例列表，跳过首页、联通云、产品`
+        + `和“登录控制台”；优先实例=${chainedEntry.instanceName || '未知'}。`,
+      );
+      if (!/\/console\/mysql\/main\/instancemanage(?:[/?#]|$)/.test(page.url())) {
+        await page.goto(chainedEntry.instanceListUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: stepTimeout,
+        });
+      }
+      await page.getByText(/^mysql\s*5\.7$/i)
+        .filter({ visible: true })
+        .first()
+        .waitFor({ state: 'visible', timeout: stepTimeout });
+    } else {
+      // 1. 复用持久化登录状态；失效时等待人工重新登录。
+      await page.goto(process.env.BASE_URL, {
+        waitUntil: 'domcontentloaded',
+      });
 
-    if (!/\/console\/home\/overview(?:[/?#]|$)/.test(page.url())) {
-      console.log('登录状态已失效，请在 Edge 中手动登录。');
-    }
+      if (!/\/console\/home\/overview(?:[/?#]|$)/.test(page.url())) {
+        console.log('登录状态已失效，请在 Edge 中手动登录。');
+      }
 
-    await page.waitForURL(/\/console\/home\/overview(?:[/?#]|$)/, {
-      timeout: stepTimeout,
-    });
-    await expect(
-      page.getByText('概览', { exact: true }).first(),
-    ).toBeVisible({ timeout: stepTimeout });
+      await page.waitForURL(/\/console\/home\/overview(?:[/?#]|$)/, {
+        timeout: stepTimeout,
+      });
+      await expect(
+        page.getByText('概览', { exact: true }).first(),
+      ).toBeVisible({ timeout: stepTimeout });
 
-    // 2. 联通云 Logo -> 产品 -> 云数据库 CUDB for MySQL。
-    const cloudLogo = page.locator('div.logo').first();
-    await expect(cloudLogo).toBeVisible({ timeout: stepTimeout });
-    await cloudLogo.click();
+      // 2. 联通云 Logo -> 产品 -> 云数据库 CUDB for MySQL。
+      const cloudLogo = page.locator('div.logo').first();
+      await expect(cloudLogo).toBeVisible({ timeout: stepTimeout });
+      await cloudLogo.click();
 
-    const productsEntry = page.getByText('产品', { exact: true })
-      .filter({ visible: true })
-      .first();
-    await expect(productsEntry).toBeVisible({ timeout: stepTimeout });
-    await productsEntry.click();
+      const productsEntry = page.getByText('产品', { exact: true })
+        .filter({ visible: true })
+        .first();
+      await expect(productsEntry).toBeVisible({ timeout: stepTimeout });
+      await productsEntry.click();
 
-    const mysqlName = /云数据库\s*CUDB\s*for\s*MySQL/i;
-    const mysqlDeadline = Date.now() + stepTimeout;
-    let mysqlProduct = null;
+      const mysqlName = /云数据库\s*CUDB\s*for\s*MySQL/i;
+      const mysqlDeadline = Date.now() + stepTimeout;
+      let mysqlProduct = null;
 
-    while (!mysqlProduct && Date.now() < mysqlDeadline) {
-      for (const frame of page.frames()) {
-        const matches = frame.getByText(mysqlName)
-          .filter({ visible: true });
-        const count = await matches.count();
-        if (count > 0) {
-          mysqlProduct = matches.nth(count - 1);
-          break;
+      while (!mysqlProduct && Date.now() < mysqlDeadline) {
+        for (const frame of page.frames()) {
+          const matches = frame.getByText(mysqlName)
+            .filter({ visible: true });
+          const count = await matches.count();
+          if (count > 0) {
+            mysqlProduct = matches.nth(count - 1);
+            break;
+          }
+        }
+
+        if (!mysqlProduct) {
+          await page.waitForTimeout(500);
         }
       }
 
       if (!mysqlProduct) {
-        await page.waitForTimeout(500);
+        throw new Error('未识别到“云数据库 CUDB for MySQL”产品入口');
       }
-    }
 
-    if (!mysqlProduct) {
-      throw new Error('未识别到“云数据库 CUDB for MySQL”产品入口');
-    }
+      const productPagePromise = context.waitForEvent('page', {
+        timeout: 10 * 1000,
+      }).catch(() => null);
+      await mysqlProduct.click({ force: true });
 
-    const productPagePromise = context.waitForEvent('page', {
-      timeout: 10 * 1000,
-    }).catch(() => null);
-    await mysqlProduct.click({ force: true });
+      const productPage = await productPagePromise;
+      if (productPage) {
+        page = productPage;
+        await page.waitForLoadState('domcontentloaded');
+      }
 
-    const productPage = await productPagePromise;
-    if (productPage) {
-      page = productPage;
-      await page.waitForLoadState('domcontentloaded');
-    }
+      // 3. 点击“登录控制台”。
+      const loginConsole = page.locator('span.long-hollow-button')
+        .filter({ hasText: '登录控制台', visible: true })
+        .first()
+        .or(
+          page.getByText('登录控制台', { exact: true })
+            .filter({ visible: true })
+            .first(),
+        );
+      await expect(loginConsole).toBeVisible({ timeout: stepTimeout });
 
-    // 3. 点击“登录控制台”。
-    const loginConsole = page.locator('span.long-hollow-button')
-      .filter({ hasText: '登录控制台', visible: true })
-      .first()
-      .or(
-        page.getByText('登录控制台', { exact: true })
-          .filter({ visible: true })
-          .first(),
-      );
-    await expect(loginConsole).toBeVisible({ timeout: stepTimeout });
+      const consolePagePromise = context.waitForEvent('page', {
+        timeout: stepTimeout,
+      }).catch(() => null);
+      await loginConsole.click();
 
-    const consolePagePromise = context.waitForEvent('page', {
-      timeout: stepTimeout,
-    }).catch(() => null);
-    await loginConsole.click();
-
-    const consolePage = await consolePagePromise;
-    if (consolePage) {
-      page = consolePage;
-      await page.waitForLoadState('domcontentloaded');
+      const consolePage = await consolePagePromise;
+      if (consolePage) {
+        page = consolePage;
+        await page.waitForLoadState('domcontentloaded');
+      }
     }
 
     const readProxyTableSnapshot = async ({ diagnostic = true } = {}) => {
@@ -217,12 +248,19 @@ test('为刚创建只读节点的 MySQL 5.7 实例开启数据库代理', async 
       if (name && !candidateNames.includes(name)) candidateNames.push(name);
     }
 
+    const preferredInstanceName = chainedEntry?.instanceName
+      || target?.instanceName
+      || '';
     if (
-      target?.instanceName
-      && candidateNames.includes(target.instanceName)
+      preferredInstanceName
+      && candidateNames.includes(preferredInstanceName)
     ) {
-      candidateNames.splice(candidateNames.indexOf(target.instanceName), 1);
-      candidateNames.unshift(target.instanceName);
+      candidateNames.splice(candidateNames.indexOf(preferredInstanceName), 1);
+      candidateNames.unshift(preferredInstanceName);
+      console.log(
+        `[3->4衔接] 已将刚创建只读实例的主实例 `
+        + `${preferredInstanceName} 排在代理候选首位。`,
+      );
     }
 
     if (!candidateNames.length) {
@@ -239,43 +277,78 @@ test('为刚创建只读节点的 MySQL 5.7 实例开启数据库代理', async 
     let proxyInteractionRoot = page;
 
     for (const candidateName of candidateNames) {
-      if (page.url() !== instanceListUrl) {
-        await page.goto(instanceListUrl, { waitUntil: 'domcontentloaded' });
-      }
+      try {
+        if (page.url() !== instanceListUrl) {
+          await page.goto(instanceListUrl, { waitUntil: 'domcontentloaded' });
+        }
 
-      const instanceName = page.getByText(candidateName, { exact: true })
-        .filter({ visible: true })
-        .first();
-      await expect(instanceName).toBeVisible({ timeout: stepTimeout });
-      const instanceRow = instanceName.locator('xpath=ancestor::tr[1]');
-      await expect(instanceRow).toContainText(/mysql\s*5\.7/i, {
-        timeout: stepTimeout,
-      });
+        console.log(`[代理实例切换] 正在尝试实例：${candidateName}`);
+        const instanceName = page.getByText(candidateName, { exact: true })
+          .filter({ visible: true })
+          .first();
+        await expect(instanceName).toBeVisible({ timeout: 15 * 1000 });
 
-      await instanceName.click();
-      console.log(`[代理容量回退] 正在检查实例：${candidateName}`);
+        const instanceRow = instanceName.locator('xpath=ancestor::tr[1]');
+        const rowText = ((await instanceRow.innerText().catch(() => '')) || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!/mysql\s*5\.7/i.test(rowText)) {
+          console.log(
+            `[代理实例切换] 跳过 ${candidateName}：不是 MySQL 5.7，`
+            + `行内容="${rowText}"。`,
+          );
+          continue;
+        }
+        if (/创建中|创建失败/.test(rowText) || !/运行中/.test(rowText)) {
+          console.log(
+            `[代理实例切换] 跳过 ${candidateName}：当前不可点击或未运行，`
+            + `行内容="${rowText}"。`,
+          );
+          continue;
+        }
 
-      // 5. 代理测试只使用已经含有只读节点的实例。
-      const readOnlySummary = page.getByText(/只读实例\s*[：:]?\s*\d+/)
-        .filter({ visible: true })
-        .first();
-      await expect(readOnlySummary).toBeVisible({ timeout: stepTimeout });
-      const readOnlyText = (await readOnlySummary.textContent()) || '';
-      const readOnlyCount = Number(readOnlyText.match(/\d+/)?.[0] || 0);
-      if (readOnlyCount <= 0) {
+        await instanceName.click({ timeout: 15 * 1000 });
+        console.log(`[代理实例切换] 已点击实例 ${candidateName}，等待详情页。`);
+
+        // 5. 代理测试只使用已经含有只读节点的实例。
+        const readOnlySummary = page.getByText(/只读实例\s*[：:]?\s*\d+/)
+          .filter({ visible: true })
+          .first();
+        await expect(readOnlySummary).toBeVisible({ timeout: 30 * 1000 });
+        const readOnlyText = (await readOnlySummary.textContent()) || '';
+        const readOnlyCount = Number(readOnlyText.match(/\d+/)?.[0] || 0);
+        if (readOnlyCount <= 0) {
+          console.log(
+            `[代理实例切换] 跳过实例 ${candidateName}：只读实例数量为 0。`,
+          );
+          continue;
+        }
         console.log(
-          `[代理容量回退] 跳过实例 ${candidateName}：只读实例数量为 0。`,
+          `已验证实例 ${candidateName} 包含 ${readOnlyCount} 个只读节点。`,
         );
+
+        // 6. 点击左侧栏“数据库代理”。
+        const databaseProxy = page.getByText('数据库代理', { exact: true })
+          .filter({ visible: true })
+          .first();
+        await expect(databaseProxy).toBeVisible({ timeout: 30 * 1000 });
+        await databaseProxy.click({ timeout: 15 * 1000 });
+        console.log(`[代理实例切换] 实例 ${candidateName} 已进入数据库代理页。`);
+      } catch (candidateError) {
+        console.warn(
+          `[代理实例切换] 实例 ${candidateName} 无法点击或页面未加载完成，`
+          + `原因：${candidateError.message}；自动尝试下一个实例。`,
+        );
+        await page.goto(instanceListUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30 * 1000,
+        }).catch((returnError) => {
+          console.warn(
+            `[代理实例切换] 返回实例列表失败：${returnError.message}。`,
+          );
+        });
         continue;
       }
-      console.log(`已验证实例 ${candidateName} 包含 ${readOnlyCount} 个只读节点。`);
-
-      // 6. 点击左侧栏“数据库代理”。
-      const databaseProxy = page.getByText('数据库代理', { exact: true })
-        .filter({ visible: true })
-        .first();
-      await expect(databaseProxy).toBeVisible({ timeout: stepTimeout });
-      await databaseProxy.click();
 
       const currentInitialSnapshot = await readProxyTableSnapshot();
       console.log(
@@ -287,8 +360,25 @@ test('为刚创建只读节点的 MySQL 5.7 实例开启数据库代理', async 
       let enableProxy = null;
       let addProxyNode = null;
       let interactionRoot = null;
+      let proxyBlockedByMissingReadOnly = false;
       await expect.poll(async () => {
         for (const frame of page.frames()) {
+          const createReadOnlyButton = frame.getByRole('button', {
+            name: '创建只读实例',
+            exact: true,
+          }).filter({ visible: true }).first();
+          const missingReadOnlyMessage = frame.getByText(
+            /尚未创建数据库只读实例|未创建数据库只读实例将无法开放数据库代理/,
+          ).filter({ visible: true }).first();
+          if (
+            await createReadOnlyButton.isVisible().catch(() => false)
+            || await missingReadOnlyMessage.isVisible().catch(() => false)
+          ) {
+            proxyBlockedByMissingReadOnly = true;
+            interactionRoot = frame;
+            return true;
+          }
+
           const enableCandidate = frame.getByRole('button', {
             name: '开启数据库代理',
             exact: true,
@@ -317,8 +407,21 @@ test('为刚创建只读节点的 MySQL 5.7 实例开启数据库代理', async 
         return false;
       }, {
         timeout: stepTimeout,
-        message: '等待“开启数据库代理”或“添加代理节点”入口出现',
+        message: '等待代理入口或“创建只读实例”提示出现',
       }).toBe(true);
+
+      if (proxyBlockedByMissingReadOnly) {
+        console.warn(
+          `[代理实例切换] 实例 ${candidateName} 的详情摘要虽然显示存在只读实例，`
+          + '但数据库代理页明确提示“尚未创建数据库只读实例”；'
+          + '以代理页实际状态为准，自动切换下一个实例。',
+        );
+        await page.goto(instanceListUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30 * 1000,
+        });
+        continue;
+      }
 
       console.log(
         `[代理入口诊断] 实例 ${candidateName} 在 frame="${interactionRoot.url()}"`
@@ -692,13 +795,37 @@ test('为刚创建只读节点的 MySQL 5.7 实例开启数据库代理', async 
     });
 
     console.log('代理配置页面保持打开，检查完成后请手动关闭。');
+    if (runtime) {
+      runtime.setPage(page);
+      runtime.state.proxy = {
+        ...(runtime.state.proxy || {}),
+        instanceName: selectedName,
+        status: '运行中',
+      };
+      return {
+        page,
+        detail: `实例 ${selectedName} 的数据库代理已运行`,
+      };
+    }
     await page.waitForEvent('close', { timeout: 0 });
   } catch (error) {
     console.error(`创建代理测试失败：${error.message}`);
     console.log('发生错误后浏览器不会自动关闭，请检查页面后手动关闭。');
-    await page.waitForEvent('close', { timeout: 0 }).catch(() => {});
+    if (!runtime) {
+      await page.waitForEvent('close', { timeout: 0 }).catch(() => {});
+    }
     throw error;
   } finally {
-    await context.close();
+    if (!runtime) await context.close();
   }
-});
+}
+
+if (process.env.MYSQL_SMOKE_CHAIN_IMPORT !== '1') {
+  test('为刚创建只读节点的 MySQL 5.7 实例开启数据库代理', async () => {
+    await runCreateProxy();
+  });
+}
+
+module.exports = {
+  runCreateProxy,
+};

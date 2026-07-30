@@ -5,7 +5,7 @@ const {
 
 test.describe.configure({ retries: 0 });
 
-test('MySQL 更换安全组 - 随机主实例', async () => {
+async function runUpdateSecurityGroup(runtime = null) {
   test.setTimeout(0);
   const stepTimeout = 10 * 60 * 1000;
 
@@ -13,7 +13,7 @@ test('MySQL 更换安全组 - 随机主实例', async () => {
     context,
     page,
     instanceName,
-  } = await openRandomMysqlInstance(stepTimeout);
+  } = await openRandomMysqlInstance(stepTimeout, { runtime });
 
   try {
     // 进入实例后读取真实的只读实例数量，不再依赖列表中的展开图标。
@@ -462,15 +462,37 @@ test('MySQL 更换安全组 - 随机主实例', async () => {
     }
 
     console.log('页面保持打开，检查完成后请手动关闭。');
+    if (runtime) {
+      runtime.setPage(page);
+      runtime.state.securityGroup = {
+        instanceName,
+        before: originalSecurityGroup,
+        after: newSecurityGroup,
+      };
+      return {
+        page,
+        detail: `${instanceName}：${originalSecurityGroup} → ${newSecurityGroup}`,
+      };
+    }
     await page.waitForEvent('close', { timeout: 0 });
   } catch (error) {
     console.error(`安全组更新失败：${error.message}`);
     console.log('发生错误后浏览器不会自动关闭，请在页面中检查后手动关闭。');
-    if (!page.isClosed()) {
+    if (!runtime && !page.isClosed()) {
       await page.waitForEvent('close', { timeout: 0 });
     }
     throw error;
   } finally {
-    await context.close();
+    if (!runtime) await context.close();
   }
-});
+}
+
+if (process.env.MYSQL_SMOKE_CHAIN_IMPORT !== '1') {
+  test('MySQL 更换安全组 - 随机主实例', async () => {
+    await runUpdateSecurityGroup();
+  });
+}
+
+module.exports = {
+  runUpdateSecurityGroup,
+};

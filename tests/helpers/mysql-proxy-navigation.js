@@ -1,51 +1,85 @@
 const path = require('path');
 const fs = require('fs');
 const { chromium, expect } = require('@playwright/test');
-const { keepOnlyOneStartupPage } = require('./browser-pages');
+const {
+  keepOnlyOneStartupPage,
+  returnToMysqlInstanceList,
+} = require('./browser-pages');
 
-async function openDatabaseProxyPage(stepTimeout) {
+async function openDatabaseProxyPage(stepTimeout, options = {}) {
+  const runtime = options.runtime || null;
   const userDataDir = path.resolve('.playwright/edge-profile');
   const statePath = path.resolve('.playwright/state/mysql-smoke-target.json');
   const target = fs.existsSync(statePath)
     ? JSON.parse(fs.readFileSync(statePath, 'utf8'))
     : null;
 
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    channel: 'msedge',
-    headless: false,
-    locale: 'zh-CN',
-    viewport: null,
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--start-maximized',
-    ],
-  });
+  const context = runtime?.context
+    || await chromium.launchPersistentContext(userDataDir, {
+      channel: 'msedge',
+      headless: false,
+      locale: 'zh-CN',
+      viewport: null,
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--start-maximized',
+      ],
+    });
 
-  let page = await keepOnlyOneStartupPage(context);
+  let page = runtime?.page && !runtime.page.isClosed()
+    ? runtime.page
+    : await keepOnlyOneStartupPage(context);
 
-  await page.goto(process.env.BASE_URL, {
-    waitUntil: 'domcontentloaded',
-  });
-
-  if (!/\/console\/home\/overview(?:[/?#]|$)/.test(page.url())) {
-    console.log('登录状态已失效，请在 Edge 中手动登录。');
+  if (
+    runtime
+    && /\/console\/mysql\/mysqldetail\/databaseagent(?:[/?#]|$)/.test(page.url())
+  ) {
+    console.log(
+      `[串联导航复用] 当前已在数据库代理页：${page.url()}；`
+      + '未重复执行首页、联通云、产品和登录控制台导航。',
+    );
+    return {
+      context,
+      page,
+      instanceName: runtime.state.proxy?.instanceName
+        || runtime.state.readonly?.instanceName
+        || target?.instanceName
+        || null,
+      ownsContext: false,
+    };
   }
 
-  await page.waitForURL(/\/console\/home\/overview(?:[/?#]|$)/, {
-    timeout: stepTimeout,
-  });
-  await expect(
-    page.getByText('概览', { exact: true }).first(),
-  ).toBeVisible({ timeout: stepTimeout });
+  if (runtime) {
+    page = await returnToMysqlInstanceList(page, stepTimeout);
+    runtime.setPage(page);
+    console.log(
+      `[串联导航复用] 已在同一 Edge 中回到 MySQL 实例列表：${page.url()}；`
+      + '未打开联通云门户、产品页或新的控制台标签。',
+    );
+  } else {
+    await page.goto(process.env.BASE_URL, {
+      waitUntil: 'domcontentloaded',
+    });
 
-  const cloudLogo = page.locator('div.logo').first();
-  await expect(cloudLogo).toBeVisible({ timeout: stepTimeout });
-  const portalPagePromise = context.waitForEvent('page', {
-    timeout: 10 * 1000,
-  }).catch(() => null);
-  await cloudLogo.click();
-  console.log('已点击“联通云”Logo。');
+    if (!/\/console\/home\/overview(?:[/?#]|$)/.test(page.url())) {
+      console.log('登录状态已失效，请在 Edge 中手动登录。');
+    }
+
+    await page.waitForURL(/\/console\/home\/overview(?:[/?#]|$)/, {
+      timeout: stepTimeout,
+    });
+    await expect(
+      page.getByText('概览', { exact: true }).first(),
+    ).toBeVisible({ timeout: stepTimeout });
+
+    const cloudLogo = page.locator('div.logo').first();
+    await expect(cloudLogo).toBeVisible({ timeout: stepTimeout });
+    const portalPagePromise = context.waitForEvent('page', {
+      timeout: 10 * 1000,
+    }).catch(() => null);
+    await cloudLogo.click();
+    console.log('已点击“联通云”Logo。');
 
   const portalPage = await portalPagePromise;
   if (portalPage) {
@@ -120,70 +154,250 @@ async function openDatabaseProxyPage(stepTimeout) {
   }).catch(() => null);
   await loginConsole.click();
 
-  const consolePage = await consolePagePromise;
-  if (consolePage) {
-    page = consolePage;
-    await page.waitForLoadState('domcontentloaded');
+    const consolePage = await consolePagePromise;
+    if (consolePage) {
+      page = consolePage;
+      await page.waitForLoadState('domcontentloaded');
+    }
+    console.log('已点击“登录控制台”。');
   }
-  console.log('已点击“登录控制台”。');
 
-  let instanceName;
-  let instanceRow;
-  const useRecordedTarget = Boolean(
-    target?.instanceName && target?.readOnlyCreated === true,
-  );
+  const normalizeText = (text) => (text || '').replace(/\s+/g, ' ').trim();
+  const triedInstanceNames = new Set();
+  const recordedInstanceName = target?.readOnlyCreated === true
+    ? target?.instanceName
+    : null;
 
-  if (useRecordedTarget) {
-    instanceName = page.getByText(target.instanceName, { exact: true })
-      .filter({ visible: true })
-      .first();
-    await expect(instanceName).toBeVisible({ timeout: stepTimeout });
-    instanceRow = instanceName.locator('xpath=ancestor::tr[1]');
-  } else {
-    const mysql57Type = page.getByText(/^mysql\s*5\.7$/i)
-      .filter({ visible: true })
-      .first();
-    await expect(mysql57Type).toBeVisible({ timeout: stepTimeout });
-    instanceRow = mysql57Type.locator('xpath=ancestor::tr[1]');
-    instanceName = instanceRow.getByText(/^mysql_[a-z0-9_-]+$/i)
-      .filter({ visible: true })
-      .first()
-      .or(
-        instanceRow.locator('a').filter({ visible: true }).first(),
+  for (let attempt = 1; attempt <= 12; attempt += 1) {
+    let instanceNameLocator = null;
+    let candidateName = null;
+
+    if (attempt === 1 && recordedInstanceName) {
+      const recordedLocator = page.getByText(recordedInstanceName, { exact: true })
+        .filter({ visible: true })
+        .first();
+      if (await recordedLocator.isVisible({ timeout: 5000 }).catch(() => false)) {
+        instanceNameLocator = recordedLocator;
+        candidateName = recordedInstanceName;
+        triedInstanceNames.add(candidateName);
+        console.log(`[代理前序] 优先尝试记录实例：${candidateName}。`);
+      } else {
+        triedInstanceNames.add(recordedInstanceName);
+        console.log(
+          `[代理前序] 记录实例 ${recordedInstanceName} 当前列表不可见，`
+          + '改为遍历当前运行中的 MySQL 5.7 实例。',
+        );
+      }
+    }
+
+    if (!instanceNameLocator) {
+      const mysql57Types = page.getByText(/^mysql\s*5\.7$/i)
+        .filter({ visible: true });
+      await expect(mysql57Types.first()).toBeVisible({ timeout: stepTimeout });
+
+      const mysql57Count = await mysql57Types.count();
+      console.log(`[代理前序] 当前实例列表发现 ${mysql57Count} 个 MySQL 5.7 候选。`);
+
+      for (let index = 0; index < mysql57Count; index += 1) {
+        const row = mysql57Types.nth(index).locator('xpath=ancestor::tr[1]');
+        const rowText = normalizeText(await row.textContent().catch(() => ''));
+        const nameInRow = row.getByText(/^mysql_[a-z0-9_-]+$/i)
+          .filter({ visible: true })
+          .first()
+          .or(row.locator('a').filter({ visible: true }).first());
+        const nameText = normalizeText(await nameInRow.textContent().catch(() => ''));
+
+        if (!nameText) {
+          console.log(`[代理前序] 跳过第 ${index + 1} 个 MySQL 5.7：未读取到实例名称。`);
+          continue;
+        }
+        if (triedInstanceNames.has(nameText)) {
+          console.log(`[代理前序] 跳过实例 ${nameText}：本轮已经尝试过。`);
+          continue;
+        }
+
+        triedInstanceNames.add(nameText);
+
+        if (!/运行中/.test(rowText) || /创建中|创建失败/.test(rowText)) {
+          console.log(
+            `[代理前序] 跳过实例 ${nameText}：当前不可操作，行内容="${rowText}"。`,
+          );
+          continue;
+        }
+
+        instanceNameLocator = nameInRow;
+        candidateName = nameText;
+        break;
+      }
+    }
+
+    if (!instanceNameLocator || !candidateName) {
+      throw new Error(
+        `未找到可进入数据库代理的 MySQL 5.7 运行中实例；已尝试：${
+          [...triedInstanceNames].join('、') || '无'
+        }`,
       );
-    await expect(instanceName).toBeVisible({ timeout: stepTimeout });
+    }
+
+    console.log(`[代理前序] 尝试进入实例 ${candidateName}（第 ${attempt}/12 次）。`);
+    await instanceNameLocator.click({ force: true });
+
+    const detailReady = await expect.poll(async () => {
+      const hasBasicInfo = await page
+        .getByText('基本信息', { exact: true })
+        .filter({ visible: true })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      const hasDatabaseProxyMenu = await page
+        .getByText('数据库代理', { exact: true })
+        .filter({ visible: true })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      return hasBasicInfo || hasDatabaseProxyMenu;
+    }, {
+      timeout: 30 * 1000,
+      intervals: [1000],
+      message: `等待实例 ${candidateName} 详情页渲染`,
+    }).toBe(true).then(() => true).catch(() => false);
+
+    if (!detailReady) {
+      console.log(`[代理前序] 实例 ${candidateName} 点击后详情页未渲染，返回列表换下一个。`);
+      page = await returnToMysqlInstanceList(page, stepTimeout);
+      if (runtime) runtime.setPage(page);
+      continue;
+    }
+
+    const databaseProxy = page.getByText('数据库代理', { exact: true })
+      .filter({ visible: true })
+      .first();
+    await expect(databaseProxy).toBeVisible({ timeout: stepTimeout });
+    await databaseProxy.click();
+    console.log(`[代理前序] 已点击实例 ${candidateName} 的“数据库代理”。`);
+
+    const proxyPageState = await expect.poll(async () => {
+      const hasUpdateProxyAccount = await page
+        .getByText('更新代理账号', { exact: true })
+        .filter({ visible: true })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      const hasEnableProxy = await page
+        .getByText('开启数据库代理', { exact: true })
+        .filter({ visible: true })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      const hasAddReadOnly = await page
+        .getByText('创建只读实例', { exact: true })
+        .filter({ visible: true })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      const hasAddProxyNode = await page
+        .getByText('添加代理节点', { exact: true })
+        .filter({ visible: true })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      const hasProxyTableHeader = await page
+        .getByText('数据库代理状态', { exact: true })
+        .filter({ visible: true })
+        .first()
+        .isVisible()
+        .catch(() => false);
+
+      if (hasUpdateProxyAccount) return 'update';
+      if (hasEnableProxy) return 'enable';
+      if (hasAddProxyNode || hasProxyTableHeader) return 'table';
+      if (hasAddReadOnly) return 'need-readonly';
+      return 'waiting';
+    }, {
+      timeout: 20 * 1000,
+      intervals: [1000],
+      message: `等待实例 ${candidateName} 的数据库代理页状态`,
+    }).not.toBe('waiting').then(async () => {
+      const hasUpdateProxyAccount = await page
+        .getByText('更新代理账号', { exact: true })
+        .filter({ visible: true })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      const hasEnableProxy = await page
+        .getByText('开启数据库代理', { exact: true })
+        .filter({ visible: true })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      const hasAddReadOnly = await page
+        .getByText('创建只读实例', { exact: true })
+        .filter({ visible: true })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      const hasAddProxyNode = await page
+        .getByText('添加代理节点', { exact: true })
+        .filter({ visible: true })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      const hasProxyTableHeader = await page
+        .getByText('数据库代理状态', { exact: true })
+        .filter({ visible: true })
+        .first()
+        .isVisible()
+        .catch(() => false);
+
+      return {
+        hasUpdateProxyAccount,
+        hasEnableProxy,
+        hasAddReadOnly,
+        hasAddProxyNode,
+        hasProxyTableHeader,
+      };
+    }).catch(() => ({
+      hasUpdateProxyAccount: false,
+      hasEnableProxy: false,
+      hasAddReadOnly: false,
+      hasAddProxyNode: false,
+      hasProxyTableHeader: false,
+    }));
+
+    if (
+      proxyPageState.hasAddReadOnly
+      && !proxyPageState.hasUpdateProxyAccount
+      && !proxyPageState.hasEnableProxy
+      && !proxyPageState.hasAddProxyNode
+      && !proxyPageState.hasProxyTableHeader
+    ) {
+      console.log(`[代理前序] 实例 ${candidateName} 的代理页提示尚未创建只读实例，返回列表换下一个。`);
+      page = await returnToMysqlInstanceList(page, stepTimeout);
+      if (runtime) runtime.setPage(page);
+      continue;
+    }
+
+    console.log(
+      `[代理前序] 实例 ${candidateName} 已进入可操作数据库代理页：`
+      + `更新代理账号=${proxyPageState.hasUpdateProxyAccount}，`
+      + `开启数据库代理=${proxyPageState.hasEnableProxy}，`
+      + `添加代理节点=${proxyPageState.hasAddProxyNode}，`
+      + `代理表格=${proxyPageState.hasProxyTableHeader}。`,
+    );
+
+    return {
+      context,
+      page,
+      instanceName: candidateName,
+      ownsContext: !runtime,
+    };
   }
 
-  await expect(instanceRow).toContainText(/mysql\s*5\.7/i, {
-    timeout: stepTimeout,
-  });
-
-  const selectedName = (await instanceName.textContent())?.trim();
-  await instanceName.click();
-  console.log(`已进入目标实例：${selectedName || target?.instanceName || '名称未知'}`);
-
-  const readOnlySummary = page.getByText(/只读实例\s*[：:]?\s*\d+/)
-    .filter({ visible: true })
-    .first();
-  await expect(readOnlySummary).toBeVisible({ timeout: stepTimeout });
-  const readOnlyText = (await readOnlySummary.textContent()) || '';
-  const readOnlyCount = Number(readOnlyText.match(/\d+/)?.[0] || 0);
-  if (readOnlyCount <= 0) {
-    throw new Error('目标 mysql 5.7 实例没有只读节点，不能操作数据库代理');
-  }
-
-  const databaseProxy = page.getByText('数据库代理', { exact: true })
-    .filter({ visible: true })
-    .first();
-  await expect(databaseProxy).toBeVisible({ timeout: stepTimeout });
-  await databaseProxy.click();
-  console.log('已点击“数据库代理”。');
-
-  return {
-    context,
-    page,
-    instanceName: selectedName || target?.instanceName || null,
-  };
+  throw new Error(
+    `连续尝试 12 次后，仍未找到可操作数据库代理的 MySQL 5.7 且含只读节点实例；已尝试：${
+      [...triedInstanceNames].join('、') || '无'
+    }`,
+  );
 }
 
 module.exports = {
