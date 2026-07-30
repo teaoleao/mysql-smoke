@@ -3,9 +3,169 @@ const { chromium, test, expect } = require('@playwright/test');
 const {
   keepOnlyOneStartupPage,
 } = require('./helpers/browser-pages');
+const createConfig = require('../config/mysql-create-entity.json');
 
 // 这是需要人工登录的交互用例，失败后不能自动重开一个 Edge 窗口。
 test.describe.configure({ retries: 0 });
+
+const compactText = (value) => String(value ?? '').replace(/\s+/g, '').trim();
+
+const randomItem = (items) => items[Math.floor(Math.random() * items.length)];
+
+const formatTimestamp = (date = new Date()) => {
+  const pad = (value) => String(value).padStart(2, '0');
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds()),
+  ].join('');
+};
+
+async function chooseRandomEnabledText(page, names, description, timeout) {
+  const available = [];
+  for (const name of names) {
+    const matches = page.getByText(name, { exact: true }).filter({ visible: true });
+    for (let index = 0; index < await matches.count(); index += 1) {
+      const candidate = matches.nth(index);
+      const control = candidate.locator(
+        'xpath=ancestor-or-self::*[self::button or @role="button" or contains(@class,"ant-radio-wrapper") or contains(@class,"ant-btn")][1]',
+      );
+      const target = await control.count() ? control : candidate;
+      const disabled = await target.evaluate((element) => (
+        element.matches(':disabled')
+        || element.getAttribute('aria-disabled') === 'true'
+        || /disabled/.test(element.className || '')
+      )).catch(() => true);
+      if (!disabled) available.push({ name, target });
+    }
+  }
+  if (!available.length) {
+    throw new Error(`${description}没有可点击选项：${names.join('、')}`);
+  }
+  const selected = randomItem(available);
+  await selected.target.scrollIntoViewIfNeeded();
+  await selected.target.click();
+  console.log(`[随机配置] ${description}：从 ${available.map((item) => item.name).join('、')} 中选择 ${selected.name}。`);
+  await page.waitForTimeout(Math.min(timeout, 1500));
+  return selected.name;
+}
+
+async function selectAntOption({
+  page,
+  select,
+  desiredText,
+  description,
+  timeout,
+  fallbackToFirst = true,
+}) {
+  await expect(select).toBeVisible({ timeout });
+  await select.scrollIntoViewIfNeeded();
+  const deadline = Date.now() + timeout;
+
+  while (Date.now() < deadline) {
+    await select.click({ force: true });
+    await page.waitForTimeout(800);
+    const dropdown = page.locator(
+      '.ant-select-dropdown:visible, [role="listbox"]:visible',
+    ).last();
+    const options = dropdown.locator(
+      '.ant-select-item-option:not(.ant-select-item-option-disabled), [role="option"]:not([aria-disabled="true"])',
+    ).filter({ visible: true });
+    const count = await options.count();
+    if (!count) {
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(2000);
+      continue;
+    }
+
+    let chosen = null;
+    if (desiredText) {
+      for (let index = 0; index < count; index += 1) {
+        const option = options.nth(index);
+        if (compactText(await option.innerText()) === compactText(desiredText)) {
+          chosen = option;
+          break;
+        }
+      }
+    }
+    // 云区域等长列表采用虚拟滚动，目标项可能尚未挂载到 DOM。
+    if (!chosen && desiredText) {
+      const scrollContainer = dropdown.locator(
+        '.rc-virtual-list-holder, .ant-select-dropdown-content',
+      ).first();
+      if (await scrollContainer.count()) {
+        await scrollContainer.evaluate((element) => {
+          element.scrollTop = element.scrollHeight;
+          element.dispatchEvent(new Event('scroll', { bubbles: true }));
+        });
+        await page.waitForTimeout(800);
+        const scrolledOptions = dropdown.locator(
+          '.ant-select-item-option:not(.ant-select-item-option-disabled), [role="option"]:not([aria-disabled="true"])',
+        ).filter({ visible: true });
+        for (let index = 0; index < await scrolledOptions.count(); index += 1) {
+          const option = scrolledOptions.nth(index);
+          if (compactText(await option.innerText()) === compactText(desiredText)) {
+            chosen = option;
+            break;
+          }
+        }
+      }
+    }
+    if (!chosen && !fallbackToFirst) {
+      await page.keyboard.press('Escape');
+      throw new Error(`${description}未找到配置项“${desiredText}”`);
+    }
+    if (!chosen) {
+      chosen = options.first();
+      console.warn(`[配置回退] ${description}未找到“${desiredText ?? ''}”，选择首个可用项“${compactText(await chosen.innerText())}”。`);
+    }
+    const selectedText = compactText(await chosen.innerText());
+    await chosen.click();
+    console.log(`[配置选择] ${description}：${selectedText}。`);
+    return selectedText;
+  }
+  throw new Error(`${description}在等待时间内始终没有可用选项`);
+}
+
+async function findControlAfterLabel(page, labelText, controlSelector) {
+  const label = page.getByText(labelText, { exact: true })
+    .filter({ visible: true })
+    .first();
+  await expect(label).toBeVisible();
+  const control = label.locator(`xpath=following::*[${controlSelector}][1]`);
+  await expect(control).toBeVisible();
+  return control;
+}
+
+async function chooseRandomDynamicButton(page, pattern, description, timeout) {
+  const matches = page.getByText(pattern, { exact: true }).filter({ visible: true });
+  const available = [];
+  for (let index = 0; index < await matches.count(); index += 1) {
+    const text = compactText(await matches.nth(index).innerText());
+    const control = matches.nth(index).locator(
+      'xpath=ancestor-or-self::*[self::button or @role="button" or contains(@class,"ant-radio-wrapper") or contains(@class,"ant-btn")][1]',
+    );
+    const target = await control.count() ? control : matches.nth(index);
+    const disabled = await target.evaluate((element) => (
+      element.matches(':disabled')
+      || element.getAttribute('aria-disabled') === 'true'
+      || /disabled/.test(element.className || '')
+    )).catch(() => true);
+    if (!disabled) available.push({ text, target });
+  }
+  if (!available.length) throw new Error(`${description}没有可点击选项`);
+  const selected = randomItem(available);
+  await selected.target.scrollIntoViewIfNeeded();
+  await selected.target.click();
+  console.log(
+    `[随机配置] ${description}：从 ${available.map(({ text }) => text).join('、')} 中选择 ${selected.text}。`,
+  );
+  await page.waitForTimeout(Math.min(timeout, 1500));
+  return selected.text;
+}
 
 async function runCreateEntity(runtime = null) {
   // 最终页面需要保持打开，直到人工关闭，因此测试不设置总超时。
@@ -133,7 +293,7 @@ async function runCreateEntity(runtime = null) {
     }
     console.log(`已点击“立即购买”，购买页面：${page.url()}`);
 
-    // 7. 在选择 VPC 前记录系统生成的实例名称，供创建结果校验使用。
+    // 7. 按配置生成实例名称：系统前缀_OA账号_精确到秒的时间戳。
     const instanceNameLabel = page.getByText('实例名称', { exact: true })
       .filter({ visible: true })
       .first();
@@ -142,20 +302,110 @@ async function runCreateEntity(runtime = null) {
       'xpath=following::input[1]',
     );
     await expect(instanceNameInput).toBeVisible({ timeout: stepTimeout });
-    const createdInstanceName = (
+    const generatedInstanceName = (
       await instanceNameInput.inputValue()
     ).trim();
-    if (!createdInstanceName) {
+    if (!generatedInstanceName) {
       throw new Error('实例名称输入框为空，无法记录待验证的实例名称');
     }
+    const createdInstanceName = [
+      generatedInstanceName,
+      createConfig.OA账号,
+      formatTimestamp(),
+    ].join('_').replace(/[^a-zA-Z0-9_-]/g, '');
+    await instanceNameInput.fill(createdInstanceName);
     console.log(
-      `[创建8.0校验] 已在选择 VPC 前记录实例名称：${createdInstanceName}。`,
+      `[实例配置] 系统名称=${generatedInstanceName}，`
+      + `按“系统名称_OA账号_时间戳”生成=${createdInstanceName}。`,
     );
 
-    // 8. 保持购买页面默认云区域“廊坊二区”，直接进入网络配置。
-    console.log('保持默认云区域“廊坊二区”，开始选择网络配置。');
+    // 8. 云区域必须执行下拉选择；配置不可用时回退到“西藏/拉萨一区”。
+    const configuredZone = createConfig.云区域?.可用区 || '拉萨一区';
+    const regionSelect = await findControlAfterLabel(
+      page,
+      '云区域',
+      'contains(@class,"ant-select")',
+    );
+    const selectedZone = await selectAntOption({
+      page,
+      select: regionSelect,
+      desiredText: configuredZone,
+      description: `云区域（${createConfig.云区域?.省份 || '西藏'}）`,
+      timeout: stepTimeout,
+      fallbackToFirst: false,
+    }).catch(async () => {
+      console.warn(
+        `[配置回退] 云区域未找到配置值“${configuredZone}”，改选西藏/拉萨一区。`,
+      );
+      return selectAntOption({
+        page,
+        select: regionSelect,
+        desiredText: '拉萨一区',
+        description: '云区域（西藏）',
+        timeout: stepTimeout,
+        fallbackToFirst: false,
+      });
+    });
 
-    // 9. 依次选择 VPC、子网和安全组；为空时每隔 5 秒重试。
+    // 数据库版本、存储类型、专区、规格均从当前页面可点击项中随机选择。
+    const selectedDatabaseType = await chooseRandomEnabledText(
+      page,
+      ['MySQL 8.0', 'MySQL 5.7'],
+      '数据库类型',
+      stepTimeout,
+    );
+    const selectedStorageType = await chooseRandomEnabledText(
+      page,
+      ['超高IO数据盘', 'SSD数据盘', '高效数据盘'],
+      '存储类型',
+      stepTimeout,
+    );
+    const selectedZoneGroup = await chooseRandomDynamicButton(
+      page,
+      /^通用专区\d+$/,
+      '专区',
+      stepTimeout,
+    );
+
+    const specificationRows = page.locator('tr:visible');
+    const enabledSpecifications = [];
+    for (let index = 0; index < await specificationRows.count(); index += 1) {
+      const row = specificationRows.nth(index);
+      const firstCell = compactText(await row.locator('td').first().innerText().catch(() => ''));
+      if (!/^[a-z]\d*\.[a-z]+\d+$/i.test(firstCell)) continue;
+      const radio = row.locator('input[type="radio"]').first();
+      const disabled = await radio.isDisabled().catch(() => false);
+      if (!disabled) enabledSpecifications.push({ name: firstCell, row, radio });
+    }
+    if (!enabledSpecifications.length) {
+      throw new Error('实例规格表中没有识别到可用规格（例如 s2.large4）');
+    }
+    const selectedSpecification = randomItem(enabledSpecifications);
+    await selectedSpecification.row.scrollIntoViewIfNeeded();
+    if (await selectedSpecification.radio.count()) {
+      await selectedSpecification.radio.check({ force: true });
+    } else {
+      await selectedSpecification.row.click();
+    }
+    console.log(
+      `[随机配置] 实例规格：从 ${enabledSpecifications.map(({ name }) => name).join('、')} `
+      + `中选择 ${selectedSpecification.name}。`,
+    );
+
+    const storageInput = await findControlAfterLabel(
+      page,
+      '存储空间',
+      'self::input',
+    );
+    await storageInput.fill(String(createConfig.存储空间GB));
+    console.log(`[配置选择] 存储空间：${createConfig.存储空间GB}GB。`);
+    console.log(
+      `[购买配置摘要] 云区域=${selectedZone}，数据库=${selectedDatabaseType}，`
+      + `存储类型=${selectedStorageType}，专区=${selectedZoneGroup}，`
+      + `规格=${selectedSpecification.name}。`,
+    );
+
+    // 9. VPC、子网和安全组保持原规则：选择第一项，为空每隔 5 秒重试。
     const selectFirstAvailableOption = async (placeholder) => {
       const placeholderElement = page
         .locator('span.ant-select-selection-placeholder')
@@ -247,30 +497,85 @@ async function runCreateEntity(runtime = null) {
     await selectFirstAvailableOption('请选择子网');
     await selectFirstAvailableOption('请选择安全组');
 
+    // 密码改为创建后设置。下面保留旧人工输入逻辑作为注释，便于将来恢复。
+    const createPasswordLater = page.getByText('创建后设置', { exact: true })
+      .filter({ visible: true })
+      .first();
+    await expect(createPasswordLater).toBeVisible({ timeout: stepTimeout });
+    await createPasswordLater.scrollIntoViewIfNeeded();
+    await createPasswordLater.click();
+    console.log('[配置选择] 管理员密码：创建后设置。');
+
+    const templateSelect = await findControlAfterLabel(
+      page,
+      '参数模板',
+      'contains(@class,"ant-select")',
+    );
+    const configuredTemplate = createConfig.参数模板?.[selectedDatabaseType];
+    const selectedTemplate = await selectAntOption({
+      page,
+      select: templateSelect,
+      desiredText: configuredTemplate,
+      description: `${selectedDatabaseType} 参数模板`,
+      timeout: stepTimeout,
+      fallbackToFirst: true,
+    });
+
+    let tableNameCase = '版本默认';
+    if (selectedDatabaseType === 'MySQL 8.0') {
+      tableNameCase = await chooseRandomEnabledText(
+        page,
+        ['不区分大小写', '区分大小写'],
+        'MySQL 8.0 表名大小写',
+        stepTimeout,
+      );
+    } else {
+      console.log('[配置选择] MySQL 5.7 表名大小写：保持页面默认。');
+    }
+
+    const resourceGroupSelect = await findControlAfterLabel(
+      page,
+      '资源组',
+      'contains(@class,"ant-select")',
+    );
+    const selectedResourceGroup = await selectAntOption({
+      page,
+      select: resourceGroupSelect,
+      desiredText: createConfig.资源组,
+      description: '资源组',
+      timeout: stepTimeout,
+      fallbackToFirst: true,
+    });
+    console.log(
+      `[购买配置补充] 参数模板=${selectedTemplate}，`
+      + `表名大小写=${tableNameCase}，资源组=${selectedResourceGroup}。`,
+    );
+
     await page.screenshot({
       path: 'test-results/mysql-network-selected.png',
       fullPage: true,
     });
 
-    // 9. 等待人工填写管理员密码和确认密码，不读取或记录密码内容。
-    const passwordInputs = page.locator('input[type="password"]')
-      .filter({ visible: true });
-
-    await expect(passwordInputs).toHaveCount(2, { timeout: stepTimeout });
-    console.log('请手动填写管理员密码和确认密码。');
-
-    await expect.poll(async () => {
-      const filled = await passwordInputs.evaluateAll((inputs) =>
-        inputs.slice(0, 2).every((input) => input.value.trim().length > 0),
-      );
-      return filled;
-    }, {
-      timeout: stepTimeout,
-      message: '等待管理员密码和确认密码均填写完成',
-    }).toBe(true);
-
-    console.log('已检测到两个密码框均非空，10 秒后点击“下一步：确认配置”。');
-    await page.waitForTimeout(10 * 1000);
+    /*
+     * 旧逻辑（需求明确要求保留但注释）：等待人工填写管理员密码和确认密码。
+     *
+     * const passwordInputs = page.locator('input[type="password"]')
+     *   .filter({ visible: true });
+     * await expect(passwordInputs).toHaveCount(2, { timeout: stepTimeout });
+     * console.log('请手动填写管理员密码和确认密码。');
+     * await expect.poll(async () => {
+     *   const filled = await passwordInputs.evaluateAll((inputs) =>
+     *     inputs.slice(0, 2).every((input) => input.value.trim().length > 0),
+     *   );
+     *   return filled;
+     * }, {
+     *   timeout: stepTimeout,
+     *   message: '等待管理员密码和确认密码均填写完成',
+     * }).toBe(true);
+     * console.log('已检测到两个密码框均非空，10 秒后继续。');
+     * await page.waitForTimeout(10 * 1000);
+     */
+    console.log('已选择“创建后设置”，无需等待人工填写密码。');
 
     // 10. 页面真实按钮完整文字是“下一步：确认配置”。
     const confirmConfig = page.getByRole('button', {
@@ -383,56 +688,71 @@ async function runCreateEntity(runtime = null) {
     const managementPage = openedManagementPage || page;
     await managementPage.waitForLoadState('domcontentloaded');
     console.log(
-      `[创建8.0校验] 已点击“管理控制台”，`
-      + `5分钟后刷新并校验实例 ${createdInstanceName}。`,
+      `[创建实例校验] 已点击“管理控制台”，`
+      + `将每隔1分钟刷新，最多8次，校验实例 ${createdInstanceName}。`,
     );
 
-    await managementPage.waitForTimeout(5 * 60 * 1000);
-    await managementPage.reload({ waitUntil: 'domcontentloaded' });
-    console.log('[创建8.0校验] 5分钟等待结束，实例列表已刷新。');
+    let isRunning = false;
+    let createdInstanceRowText = '尚未找到目标实例';
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      console.log(`[创建实例校验][${attempt}/8] 等待1分钟后刷新实例列表。`);
+      await managementPage.waitForTimeout(60 * 1000);
+      await managementPage.reload({ waitUntil: 'domcontentloaded' });
+      await managementPage.waitForTimeout(2000);
 
-    const createdInstanceLink = managementPage.getByText(
-      createdInstanceName,
-      { exact: true },
-    ).filter({ visible: true }).first();
-    await expect(createdInstanceLink).toBeVisible({
-      timeout: stepTimeout,
-    });
-
-    const createdInstanceRow = createdInstanceLink.locator(
-      'xpath=ancestor::tr[1]',
-    );
-    await expect(createdInstanceRow).toBeVisible({ timeout: stepTimeout });
-    const createdInstanceRowText = (
-      await createdInstanceRow.innerText()
-    ).replace(/\s+/g, ' ').trim();
-    const isRunning = /运行中/.test(createdInstanceRowText);
-    console.log(
-      `[创建8.0校验] 实例=${createdInstanceName}，`
-      + `列表行=${JSON.stringify(createdInstanceRowText)}，`
-      + `是否运行中=${isRunning}。`,
-    );
+      const createdInstanceLink = managementPage.getByText(
+        createdInstanceName,
+        { exact: true },
+      ).filter({ visible: true }).first();
+      if (!await createdInstanceLink.count()) {
+        createdInstanceRowText = '尚未找到目标实例';
+        console.log(
+          `[创建实例校验][${attempt}/8] 未找到实例 ${createdInstanceName}，继续轮询。`,
+        );
+        continue;
+      }
+      const createdInstanceRow = createdInstanceLink.locator(
+        'xpath=ancestor::tr[1]',
+      );
+      createdInstanceRowText = (
+        await createdInstanceRow.innerText()
+      ).replace(/\s+/g, ' ').trim();
+      isRunning = /运行\s*中/.test(createdInstanceRowText);
+      console.log(
+        `[创建实例校验][${attempt}/8] 实例=${createdInstanceName}，`
+        + `列表行=${JSON.stringify(createdInstanceRowText)}，`
+        + `是否运行中=${isRunning}。`,
+      );
+      if (isRunning) {
+        console.log(
+          `[创建实例校验成功] ${selectedDatabaseType} 实例 `
+          + `${createdInstanceName} 已进入“运行中”，停止刷新。`,
+        );
+        break;
+      }
+    }
     if (!isRunning) {
       throw new Error(
-        `[创建8.0校验失败] 实例 ${createdInstanceName} `
-        + `等待5分钟后不是“运行中”，实际行内容：${createdInstanceRowText}`,
+        `[创建实例校验失败] ${selectedDatabaseType} 实例 ${createdInstanceName} `
+        + `每分钟刷新、共8次后仍不是“运行中”，最终行内容：${createdInstanceRowText}`,
       );
     }
-    console.log(
-      `[创建8.0校验成功] 实例 ${createdInstanceName} 已进入“运行中”。`,
-    );
     console.log('浏览器将保持打开；检查完成后请手动关闭该页面。');
 
     // 不自动关闭最终页面，等待人工检查并关闭。
     if (runtime) {
       runtime.setPage(managementPage);
-      runtime.state.create80 = {
+      const stateKey = selectedDatabaseType === 'MySQL 8.0'
+        ? 'create80'
+        : 'create57';
+      runtime.state[stateKey] = {
         instanceName: createdInstanceName,
+        databaseType: selectedDatabaseType,
         status: '运行中',
       };
       return {
         page: managementPage,
-        detail: `MySQL 8.0 实例 ${createdInstanceName} 已运行`,
+        detail: `${selectedDatabaseType} 实例 ${createdInstanceName} 已运行`,
       };
     }
     await managementPage.waitForEvent('close', { timeout: 0 });
@@ -442,7 +762,7 @@ async function runCreateEntity(runtime = null) {
 }
 
 if (process.env.MYSQL_SMOKE_CHAIN_IMPORT !== '1') {
-  test('MySQL 购买实例入口冒烟测试', async () => {
+  test('MySQL 按配置与随机策略创建实例冒烟测试', async () => {
     await runCreateEntity();
   });
 }
